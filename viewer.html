@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PairFold 3D</title>
+    <style>
+      :root {
+        --bg: #1a1612;
+        --ink: #efe6da;
+        --muted: #a89884;
+        --line: #3d3228;
+        --accent: #c4894a;
+        --panel: #241e18;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: "Segoe UI Variable", "Avenir Next", Candara, "Segoe UI", sans-serif;
+      }
+      .viewer-page {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        height: 100%;
+      }
+      .viewer-page__bar {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.65rem 1rem;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+      .viewer-page__bar h1 {
+        margin: 0;
+        font-size: 1rem;
+        font-weight: 700;
+      }
+      .viewer-page__bar p {
+        margin: 0;
+        font-size: 0.82rem;
+        color: var(--muted);
+      }
+      #viewer3d {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        min-height: 480px;
+        background: #241e18;
+      }
+      #viewer3d canvas {
+        display: block;
+        width: 100% !important;
+        height: 100% !important;
+      }
+      .empty {
+        padding: 2rem;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="viewer-page">
+      <header class="viewer-page__bar">
+        <h1 id="viewer-title">PairFold 3D</h1>
+        <p>Hover for residue · φ/ψ · drag to rotate · scroll to zoom</p>
+      </header>
+      <div id="viewer3d"></div>
+    </div>
+    <script type="module" src="/src/viewerPopup.js"></script>
+  </body>
+</html>

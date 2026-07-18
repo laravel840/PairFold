@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PairFold — Dipeptide Conformations</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #1a1612;
+        color: #efe6da;
+        font-family: "Segoe UI Variable", "Avenir Next", Candara, "Segoe UI", sans-serif;
+        color-scheme: dark;
+      }
+      #boot {
+        padding: 2rem 1.5rem;
+        max-width: 40rem;
+      }
+      #boot strong {
+        display: block;
+        font-size: 1.75rem;
+        letter-spacing: -0.03em;
+        margin-bottom: 0.35rem;
+      }
+      #boot-status {
+        color: #a89884;
+      }
+      #boot-error {
+        color: #e07070;
+        white-space: pre-wrap;
+        font-family: Consolas, monospace;
+        font-size: 0.85rem;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="boot">
+        <strong>PairFold</strong>
+        <p id="boot-status">Starting…</p>
+        <p id="boot-error" hidden></p>
+      </div>
+    </div>
+    <script>
+      (function () {
+        var status = document.getElementById("boot-status");
+        var err = document.getElementById("boot-error");
+        var timer = setTimeout(function () {
+          if (status && status.textContent.indexOf("Starting") === 0) {
+            status.textContent =
+              "Still loading scripts… If this hangs, hard-refresh (Ctrl+Shift+R) or try http://127.0.0.1:5173/";
+          }
+        }, 2500);
+        window.__pairfoldClearBootTimer = function () {
+          clearTimeout(timer);
+        };
+        window.addEventListener("error", function (ev) {
+          if (!err) return;
+          err.hidden = false;
+          err.textContent =
+            "Load error: " +
+            (ev.message || "unknown") +
+            (ev.filename ? "\n" + ev.filename + ":" + ev.lineno : "");
+        });
+        window.addEventListener("unhandledrejection", function (ev) {
+          if (!err) return;
+          err.hidden = false;
+          err.textContent = "Load error: " + String(ev.reason || "promise rejected");
+        });
+      })();
+    </script>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

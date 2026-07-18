@@ -1,0 +1,20 @@
+{
+  "name": "pairfold",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "ml:pipeline": "python -m pairfold.run_pipeline",
+    "ml:server": "python -m pairfold.server"
+  },
+
+  "devDependencies": {
+    "vite": "^6.0.0"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  }
+}

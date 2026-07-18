@@ -1,0 +1,13 @@
+{
+  "n_total": 379946,
+  "by_length": {
+    "2": 19946,
+    "3": 120000,
+    "4": 120000,
+    "5": 120000
+  },
+  "n_structures": 1094,
+  "n_unique_sequences": 89596,
+  "max_per_sequence": 50,
+  "aa_list": "ACDEFGHIKLMNPQRSTVWY"
+}

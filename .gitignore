@@ -1,0 +1,39 @@
+# Dependencies & builds
+node_modules/
+dist/
+.vite/
+*.egg-info/
+build/
+.eggs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+.env
+.venv
+
+# Large regenerable training corpora (fetch/extract pipelines recreate these)
+pairfold/data/pdb_raw/
+pairfold/data/fragments/fragments.jsonl
+pairfold/data/fragments/val_split.jsonl
+
+# Logs & local debug
+*.log
+debug-*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Optional local caches
+.benchmark_cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

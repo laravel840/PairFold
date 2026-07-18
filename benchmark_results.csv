@@ -1,0 +1,6 @@
+pdb_id,length,time_s,rmsd,mode,n_anchors,contact_mean_score
+1A8O,33,6.568832,13.122800,segment_assemble_tertiary,8,0.8566
+1CRN,46,11.441001,16.043588,segment_assemble_tertiary,11,0.9991
+2GB1,56,13.231459,18.014312,segment_assemble_tertiary,14,0.9923
+1UBQ,76,21.080872,19.299981,segment_assemble_tertiary,19,0.9848
+3GB1,56,12.635238,19.379118,segment_assemble_tertiary,14,0.9923
