@@ -5,9 +5,11 @@ import {
   CSS2DObject,
 } from "three/addons/renderers/CSS2DRenderer.js";
 import { buildBackbone3D } from "./buildBackbone3D.js";
+import { buildAllAtom3D, isBackboneOnly } from "./buildAllAtom3D.js";
 import { AA_BY_CODE } from "./data/aminoAcids.js";
 
-let active = null;
+/** @type {Map<HTMLElement, object>} */
+const actives = new Map();
 
 function disposeObject(obj) {
   if (obj.geometry) obj.geometry.dispose();
@@ -17,14 +19,15 @@ function disposeObject(obj) {
   }
 }
 
-function makeBond(a, b, color) {
+function makeBond(a, b, color, radius = 0.11) {
   const start = new THREE.Vector3(a.x, a.y, a.z);
   const end = new THREE.Vector3(b.x, b.y, b.z);
   const dir = new THREE.Vector3().subVectors(end, start);
   const length = dir.length();
+  if (length < 1e-6) return new THREE.Group();
   const mid = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5);
 
-  const geom = new THREE.CylinderGeometry(0.11, 0.11, length, 12);
+  const geom = new THREE.CylinderGeometry(radius, radius, length, 10);
   const mat = new THREE.MeshStandardMaterial({
     color,
     roughness: 0.45,
@@ -51,6 +54,7 @@ function makeAtom(atom, radius, residueMeta) {
   mesh.userData = {
     pickable: true,
     element: atom.element,
+    atomName: atom.atomName || atom.element,
     residue: residueMeta,
     baseEmissive: 0x000000,
   };
@@ -124,18 +128,81 @@ function peptideFromAngles(input) {
 
 /** Normalize peptide angles OR API structure into renderable residues/atoms/bonds. */
 function normalizeGeometry(input) {
+  const n =
+    input?.length ||
+    input?.phis?.length ||
+    input?.sequence?.length ||
+    input?.structure?.residues?.length ||
+    0;
+
+  // Prefer API all-atom when it actually has sidechains
   const structAtoms = input?.structure?.atoms;
-  if (Array.isArray(structAtoms) && structAtoms.length > 0) {
+  if (
+    Array.isArray(structAtoms) &&
+    structAtoms.length > 0 &&
+    !isBackboneOnly(input.structure, n || 1)
+  ) {
     return normalizeApiStructure(input.structure, input);
   }
-  if (Array.isArray(input?.atoms) && input.atoms.length > 0 && input?.residues) {
+  if (
+    Array.isArray(input?.atoms) &&
+    input.atoms.length > 0 &&
+    input?.residues &&
+    !isBackboneOnly(input, n || 1)
+  ) {
     return normalizeApiStructure(input, null);
   }
+
+  // Client-side Stage-2/3 for short chains (works even if API stripped atoms)
+  if (n > 0 && n <= 256 && input?.phis?.length && !input?.caTrace) {
+    try {
+      return buildAllAtom3D(input);
+    } catch (err) {
+      console.warn("all-atom build failed, falling back to backbone", err);
+    }
+  }
+
   return buildBackbone3D(peptideFromAngles(input));
 }
 
+function atomName(a) {
+  return String(a.name || a.element || "").toUpperCase();
+}
+
+function isCaAtom(a) {
+  return atomName(a) === "CA";
+}
+
+/** CPK-ish colors; sidechain carbons tinted by residue color. */
+function colorForAtom(a, residueColor) {
+  const nm = atomName(a);
+  const el = String(a.element || "").toUpperCase();
+  if (nm === "CA") return residueColor || colorForCode(a.code);
+  if (nm === "N" || el === "N") return "#4b6bfb";
+  if (nm === "O" || nm === "OG" || nm === "OG1" || nm === "OH" || el === "O")
+    return "#e4572e";
+  if (nm.startsWith("S") || el === "S") return "#e2c044";
+  if (el === "H" || nm === "H") return "#f5f5f5";
+  if (a.sidechain) return residueColor || "#9aa5b1";
+  return "#8a95a1"; // backbone C
+}
+
+function radiusForAtom(a) {
+  const nm = atomName(a);
+  if (nm === "CA") return 0.48;
+  if (nm === "N") return 0.28;
+  if (nm === "C" || nm === "O") return 0.26;
+  if (a.sidechain) {
+    if (nm.startsWith("S")) return 0.32;
+    if (nm.startsWith("N") || nm.startsWith("O")) return 0.24;
+    return 0.22;
+  }
+  return 0.24;
+}
+
 function normalizeApiStructure(structure, meta) {
-  const residues = structure.residues.map((r, i) => ({
+  const rawRes = structure.residues || [];
+  const residues = rawRes.map((r, i) => ({
     index: i,
     code: r.code,
     abbr: abbrForCode(r.code),
@@ -148,23 +215,61 @@ function normalizeApiStructure(structure, meta) {
     psi: r.psi ?? meta?.psis?.[i] ?? 0,
   }));
 
+  // If API omitted residue frames, reconstruct CA from atoms
+  if (!residues.length && structure.atoms?.length) {
+    const byRes = new Map();
+    for (const a of structure.atoms) {
+      const i = a.residue ?? 0;
+      if (!byRes.has(i)) byRes.set(i, { index: i, code: a.code || "X" });
+      const row = byRes.get(i);
+      const nm = atomName(a);
+      if (nm === "N" || nm === "CA" || nm === "C") {
+        row[nm] = { x: a.x, y: a.y, z: a.z };
+      }
+      if (a.code) row.code = a.code;
+    }
+    const maxI = Math.max(...byRes.keys());
+    for (let i = 0; i <= maxI; i++) {
+      const r = byRes.get(i) || { index: i, code: "X" };
+      residues.push({
+        index: i,
+        code: r.code,
+        abbr: abbrForCode(r.code),
+        name: nameForCode(r.code),
+        color: colorForCode(r.code),
+        N: r.N,
+        CA: r.CA,
+        C: r.C,
+        phi: meta?.phis?.[i] ?? 0,
+        psi: meta?.psis?.[i] ?? 0,
+      });
+    }
+  }
+
   const atoms = structure.atoms.map((a) => {
     const code = a.code || residues[a.residue]?.code;
+    const resColor = residues[a.residue]?.color || colorForCode(code);
     return {
-      ...a,
-      color:
-        a.element === "CA"
-          ? colorForCode(code)
-          : a.element === "N"
-            ? "#4b6bfb"
-            : "#6b7280",
+      x: a.x,
+      y: a.y,
+      z: a.z,
+      residue: a.residue,
+      element: isCaAtom(a) ? "CA" : a.element || atomName(a)[0] || "C",
+      atomName: atomName(a),
+      sidechain: Boolean(a.sidechain),
+      color: colorForAtom({ ...a, code }, resColor),
       code,
       abbr: abbrForCode(code),
       name: nameForCode(code),
     };
   });
 
-  return { residues, atoms, bonds: structure.bonds };
+  return {
+    residues,
+    atoms,
+    bonds: structure.bonds || [],
+    allAtom: true,
+  };
 }
 
 function buildSceneContent(root, input) {
@@ -181,12 +286,23 @@ function buildSceneContent(root, input) {
     return buildCaTraceScene(root, residues, pickables);
   }
 
+  // Thinner bonds for dense all-atom models
+  const allAtom = Boolean(geom.allAtom) || atoms.length > length * 3 + 2;
+  const bondRadius = allAtom ? 0.07 : 0.11;
+
   for (const [i, j] of bonds) {
     const a = atoms[i];
     const b = atoms[j];
+    if (!a || !b) continue;
     const color =
-      a.element === "CA" ? a.color : b.element === "CA" ? b.color : "#8a95a1";
-    root.add(makeBond(a, b, color));
+      a.element === "CA"
+        ? a.color
+        : b.element === "CA"
+          ? b.color
+          : a.sidechain || b.sidechain
+            ? a.color || b.color
+            : "#8a95a1";
+    root.add(makeBond(a, b, color, bondRadius));
   }
 
   for (const atom of atoms) {
@@ -199,15 +315,14 @@ function buildSceneContent(root, input) {
       phi: res?.phi,
       psi: res?.psi,
       color: res?.color || atom.color,
+      atomName: atom.atomName,
     };
-    const radius =
-      atom.element === "CA" ? 0.52 : atom.element === "N" ? 0.28 : 0.26;
-    const mesh = makeAtom(atom, radius, meta);
+    const mesh = makeAtom(atom, radiusForAtom(atom), meta);
     root.add(mesh);
     pickables.push(mesh);
   }
 
-  return { residues, length, pickables };
+  return { residues, atoms, length, pickables, allAtom };
 }
 
 function buildCaTraceScene(root, residues, pickables) {
@@ -271,8 +386,14 @@ function buildCaTraceScene(root, residues, pickables) {
   return { residues, length: n, pickables };
 }
 
-function peptideBounds(residues) {
+function peptideBounds(residues, atoms) {
   const box = new THREE.Box3();
+  if (atoms?.length) {
+    for (const a of atoms) {
+      box.expandByPoint(new THREE.Vector3(a.x, a.y, a.z));
+    }
+    if (!box.isEmpty()) return box;
+  }
   for (const r of residues) {
     // Long-chain Cα-trace mode omits N/C — only CA is guaranteed
     if (r.N) box.expandByPoint(new THREE.Vector3(r.N.x, r.N.y, r.N.z));
@@ -282,8 +403,8 @@ function peptideBounds(residues) {
   return box;
 }
 
-function fitCamera(camera, controls, residues) {
-  const box = peptideBounds(residues);
+function fitCamera(camera, controls, residues, atoms) {
+  const box = peptideBounds(residues, atoms);
   const size = Math.max(box.getSize(new THREE.Vector3()).length(), 3);
   const center = box.getCenter(new THREE.Vector3());
   const n = residues.length;
@@ -302,7 +423,8 @@ function fitCamera(camera, controls, residues) {
 }
 
 function tooltipHTML(meta, element) {
-  const atom = element ? ` · ${element}` : "";
+  const atomLabel = meta.atomName || element;
+  const atom = atomLabel ? ` · ${atomLabel}` : "";
   const name = meta.abbr || meta.name || meta.code || "";
   const phi = fmtAngle(meta.phi);
   const psi = fmtAngle(meta.psi);
@@ -316,23 +438,28 @@ function tooltipHTML(meta, element) {
   `;
 }
 
-export function destroyPeptide3D() {
-  if (!active) return;
-  cancelAnimationFrame(active.raf);
-  window.removeEventListener("resize", active.onResize);
-  if (active.onPointerMove) {
-    active.pointerTarget.removeEventListener("pointermove", active.onPointerMove);
-    active.pointerTarget.removeEventListener("pointerleave", active.onPointerLeave);
+export function destroyPeptide3D(container) {
+  if (container) {
+    const active = actives.get(container);
+    if (!active) return;
+    cancelAnimationFrame(active.raf);
+    window.removeEventListener("resize", active.onResize);
+    if (active.onPointerMove) {
+      active.pointerTarget.removeEventListener("pointermove", active.onPointerMove);
+      active.pointerTarget.removeEventListener("pointerleave", active.onPointerLeave);
+    }
+    active.controls.dispose();
+    active.renderer.dispose();
+    active.container.replaceChildren();
+    actives.delete(container);
+    return;
   }
-  active.controls.dispose();
-  active.renderer.dispose();
-  active.container.replaceChildren();
-  active = null;
+  for (const el of [...actives.keys()]) destroyPeptide3D(el);
 }
 
 export function mountPeptide3D(container, input) {
-  destroyPeptide3D();
   if (!container) return;
+  destroyPeptide3D(container);
 
   const width = container.clientWidth || 360;
   const height = Math.max(container.clientHeight || 0, 340);
@@ -363,7 +490,10 @@ export function mountPeptide3D(container, input) {
 
   const root = new THREE.Group();
   scene.add(root);
-  const { residues, length, pickables } = buildSceneContent(root, input);
+  const { residues, atoms, length, pickables, allAtom } = buildSceneContent(
+    root,
+    input,
+  );
   if (!residues?.length) {
     container.innerHTML = `<p class="empty">No residues to display.</p>`;
     return;
@@ -379,14 +509,22 @@ export function mountPeptide3D(container, input) {
   fill.position.set(-6, -2, -4);
   scene.add(fill);
 
-  const box = peptideBounds(residues);
+  const box = peptideBounds(residues, atoms);
   const span = Math.max(box.getSize(new THREE.Vector3()).length(), 4);
   const gridSize = Math.ceil(span * 1.6 + 4);
   const grid = new THREE.GridHelper(gridSize, 14, 0x4a3c30, 0x322820);
   grid.position.y = box.min.y - 1.2;
   scene.add(grid);
 
-  fitCamera(camera, controls, residues);
+  fitCamera(camera, controls, residues, atoms);
+
+  // Badge so it's obvious all-atom / sidechains are shown
+  if (allAtom && atoms?.length) {
+    const badge = document.createElement("div");
+    badge.className = "viewer-badge";
+    badge.textContent = `All-atom · ${atoms.length} atoms`;
+    container.appendChild(badge);
+  }
   // Keep far plane beyond camera distance so long chains aren't clipped away
   const camDist = camera.position.distanceTo(controls.target);
   camera.far = Math.max(5000, camDist * 20 + span * 10);
@@ -440,7 +578,10 @@ export function mountPeptide3D(container, input) {
       clearHover();
       return;
     }
-    tip.innerHTML = tooltipHTML(meta, element);
+    tip.innerHTML = tooltipHTML(
+      { ...meta, atomName: mesh.userData?.atomName || meta.atomName },
+      element,
+    );
     tip.hidden = false;
     labelRenderer.domElement.style.cursor = "pointer";
     positionTip(clientX, clientY);
@@ -485,7 +626,7 @@ export function mountPeptide3D(container, input) {
   labelRenderer.domElement.addEventListener("pointerleave", onPointerLeave);
 
   const onResize = () => {
-    if (!active) return;
+    if (!actives.has(container)) return;
     const w = container.clientWidth || 360;
     const h = Math.max(container.clientHeight || 0, 340);
     camera.aspect = w / h;
@@ -496,7 +637,7 @@ export function mountPeptide3D(container, input) {
 
   window.addEventListener("resize", onResize);
 
-  active = {
+  const state = {
     container,
     renderer,
     labelRenderer,
@@ -507,9 +648,12 @@ export function mountPeptide3D(container, input) {
     onPointerLeave,
     pointerTarget: labelRenderer.domElement,
   };
+  actives.set(container, state);
 
   const tick = () => {
-    active.raf = requestAnimationFrame(tick);
+    const cur = actives.get(container);
+    if (!cur) return;
+    cur.raf = requestAnimationFrame(tick);
     controls.update();
     renderer.render(scene, camera);
     labelRenderer.render(scene, camera);

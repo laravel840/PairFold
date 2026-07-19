@@ -37,3 +37,11 @@ Thumbs.db
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+pairfold/data/esm_cache/
+pairfold/data/fold_crops/
+pairfold/export/
+benchmarks/pdbs/
+
+# Large / regenerable local artifacts
+*.pt.bak
+.debug/

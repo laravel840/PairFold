@@ -17,19 +17,40 @@ from .config import (
     CALIB_DIR,
     CKPT_DIR,
     CONSENSUS_WEIGHT,
+    CONTACT_GATE_MIN_MEAN,
+    CONTACT_GATE_MIN_N,
+    CONTACT_SHARP_MEAN,
+    CONTACT_SHARP_MIN_N,
     CONTACT_USE_MAX_LEN,
     DP_FULL_MAX_LEN,
+    EARLY_CONTACT_ACCEPT_RATIO,
+    EARLY_CONTACT_FOLD,
+    EARLY_CONTACT_RESTARTS,
+    EARLY_CONTACT_STEPS,
     FRAG_DIR,
     MAX_LEN,
     MAX_QUERY_LEN,
     MIN_LEN,
     PAD_IDX,
+    SCAFFOLD_ENSEMBLE_MEMBERS,
+    SOFT_CONTACT_STEPS,
+    SOFT_CONTACT_THRESH,
     SS_BOUNDARY_OPT_MAX_LEN,
     SS_PIPELINE_MAX_LEN,
     STRUCTURE_EXPORT_MAX_LEN,
     LEVER_ASSEMBLY_MAX_LEN,
     TERTIARY_MAX_LEN,
     UNK_IDX,
+    USE_ESM_ALT_CONTACTS,
+    STAGE23_ADD_HYDROGENS,
+    STAGE23_MAX_LEN,
+    USE_FOLD_HEAD,
+    USE_FOLD_HEAD_SELECT,
+    USE_LEVER_POLISH,
+    USE_SCAFFOLD_ENSEMBLE,
+    USE_SOFT_CONTACT_FOLD,
+    USE_STAGE2_SIDECHAINS,
+    USE_STAGE3_ATOMS,
     VIEW_3D_MAX_LEN,
 )
 from .mem_guard import MemoryGuardError, guard_rss, release_caches
@@ -37,6 +58,62 @@ from .model.fragment_net import FragmentTorsionNet, sincos_to_angles
 from .segment import Segment, optimal_segmentation
 
 AA_SET = set(AA_LIST)
+
+
+def _maybe_all_atom(
+    seq: str,
+    phis: List[float],
+    psis: List[float],
+    backbone: Dict,
+) -> Dict:
+    """Upgrade backbone structure with Stage-2/3 when enabled and length allows."""
+    if not (USE_STAGE2_SIDECHAINS or USE_STAGE3_ATOMS):
+        return backbone
+    if len(seq) > STAGE23_MAX_LEN:
+        backbone = dict(backbone)
+        backbone["stage23_skipped"] = True
+        backbone["stage23_note"] = f"Stage-2/3 skipped (length > {STAGE23_MAX_LEN})."
+        return backbone
+    try:
+        from .stage2_sidechains import pack_sidechains
+        from .stage3_atoms import complete_all_atom
+
+        note_parts: List[str] = []
+        sc = None
+        if USE_STAGE2_SIDECHAINS:
+            sc = pack_sidechains(
+                seq, phis, psis, backbone=backbone, max_len=STAGE23_MAX_LEN
+            )
+            if sc.get("note"):
+                note_parts.append(sc["note"])
+        if USE_STAGE3_ATOMS:
+            aa = complete_all_atom(
+                seq,
+                phis,
+                psis,
+                sidechain=sc,
+                add_hydrogens=STAGE23_ADD_HYDROGENS,
+                max_len=STAGE23_MAX_LEN,
+            )
+            if aa.get("enabled"):
+                aa["stage2"] = {
+                    "clash_energy": (sc or {}).get("clash_energy", 0.0),
+                    "n_sidechain_atoms": (sc or {}).get("n_sidechain_atoms", 0),
+                    "chi_angles": (sc or {}).get("chi_angles") or [],
+                }
+                # Prefer Stage-3 note only (avoids duplicated Stage-2 line)
+                return aa
+        if sc and sc.get("enabled"):
+            # Stage-2 only: merge sidechain atoms onto backbone payload
+            out = dict(backbone)
+            out["atoms"] = list(backbone.get("atoms") or []) + list(sc.get("atoms") or [])
+            out["stage2"] = sc
+            out["note"] = " ".join(note_parts)
+            return out
+    except Exception as e:
+        backbone = dict(backbone)
+        backbone["stage23_error"] = type(e).__name__
+    return backbone
 
 
 def _device() -> torch.device:
@@ -199,7 +276,7 @@ class FragmentPredictor:
         return self._contact_predictor if self._contact_predictor is not False else None
 
     def predict_contacts(self, sequence: str) -> Dict:
-        """Run ContactPairNet and return top-k anchors (empty if no ckpt)."""
+        """Run ESM / ContactPairNet and return top-k anchors (empty if unavailable)."""
         cp = self._get_contact_predictor()
         if cp is None or not cp.enabled:
             return {
@@ -209,8 +286,289 @@ class FragmentPredictor:
                 "n_candidates": 0,
                 "mean_score": 0.0,
                 "ckpt": "",
+                "source": "none",
             }
         return cp.top_anchors(sequence)
+
+    def _fold_head_refine(
+        self,
+        sequence: str,
+        phis: List[float],
+        psis: List[float],
+        contact_probs: Optional[np.ndarray],
+        anchors: Optional[List[Tuple[int, int, float]]] = None,
+    ) -> Tuple[List[float], List[float], str]:
+        """Learned ESM distance head refine (post-assembly). Dual-path accept.
+
+        Skip when hard anchors are gated — soft-map owns that path; fold-head
+        previously collapsed 1CRN (13.7→17.7) via overconfident wrong distances.
+        """
+        if not USE_FOLD_HEAD or len(sequence) > LEVER_ASSEMBLY_MAX_LEN:
+            return list(phis), list(psis), ""
+        # Only sharp maps: sparse anchors (e.g. 1A8O n=5) previously regressed.
+        if not anchors or len(anchors) < CONTACT_SHARP_MIN_N:
+            return list(phis), list(psis), ""
+        try:
+            from .fold_head_infer import fold_head_scaffold, load_fold_head
+            from .tertiary import score_tertiary
+
+            if load_fold_head() is None:
+                return list(phis), list(psis), ""
+            base_phys = float(score_tertiary(sequence, phis, psis, anchors=None)["total"])
+            best = None
+            best_seed = 0
+            for seed in (3, 11, 29):
+                out = fold_head_scaffold(
+                    sequence, phis, psis, contact_probs=contact_probs, seed=seed
+                )
+                if not out["improved"]:
+                    continue
+                phys = float(
+                    score_tertiary(
+                        sequence, out["phis_deg"], out["psis_deg"], anchors=None
+                    )["total"]
+                )
+                # Require physics not to collapse (blocks contact-rank cheats)
+                if phys < base_phys - 0.35:
+                    continue
+                if best is None or out["best_rank"] > best["best_rank"]:
+                    best = out
+                    best_seed = seed
+            if best is None:
+                return list(phis), list(psis), " Fold-head no improve."
+            return (
+                [float(x) for x in best["phis_deg"]],
+                [float(x) for x in best["psis_deg"]],
+                (
+                    f" Fold-head@{best_seed} rank "
+                    f"{best['base_rank']:.2f}->{best['best_rank']:.2f}."
+                ),
+            )
+        except Exception as e:
+            return list(phis), list(psis), f" Fold-head skipped ({type(e).__name__})."
+
+    def _soft_map_rescue(
+        self,
+        sequence: str,
+        phis: List[float],
+        psis: List[float],
+        contact_probs: Optional[np.ndarray],
+    ) -> Tuple[List[float], List[float], str]:
+        """
+        Gated-map soft fold. Must run AFTER lever assembly — pre-assembly soft
+        is wiped by greedy pentamer rebuild (and often fails on segmented inits).
+        """
+        if (
+            not USE_SOFT_CONTACT_FOLD
+            or contact_probs is None
+            or len(sequence) > LEVER_ASSEMBLY_MAX_LEN
+        ):
+            return list(phis), list(psis), ""
+        try:
+            from .soft_contact_fold import soft_map_scaffold
+
+            maps: List[Tuple[str, np.ndarray]] = [("t12", contact_probs)]
+            if USE_ESM_ALT_CONTACTS:
+                try:
+                    cp = self._get_contact_predictor()
+                    if cp is not None and hasattr(cp, "contact_probs"):
+                        alt_p = cp.contact_probs(sequence, model="alt")
+                        if (
+                            alt_p is not None
+                            and alt_p.size
+                            and float(alt_p.max()) > 0.2
+                            and (
+                                alt_p.shape != contact_probs.shape
+                                or not np.allclose(alt_p, contact_probs, atol=1e-5)
+                            )
+                        ):
+                            maps.append(("t30", alt_p))
+                except Exception:
+                    pass
+
+            best_soft = None
+            best_tag = "t12"
+            best_key = -1e9
+            fh_select = None
+            if USE_FOLD_HEAD_SELECT:
+                try:
+                    from .fold_head_infer import decoy_distance_score, load_fold_head
+
+                    if load_fold_head() is not None:
+                        fh_select = decoy_distance_score
+                except Exception:
+                    fh_select = None
+            for map_name, pmap in maps:
+                for seed in (5, 19, 37, 51):
+                    soft = soft_map_scaffold(
+                        sequence,
+                        phis,
+                        psis,
+                        pmap,
+                        n_steps=SOFT_CONTACT_STEPS,
+                        fit_steps=1800,
+                        seed=seed,
+                        contact_thresh=SOFT_CONTACT_THRESH,
+                    )
+                    if not soft["improved"]:
+                        continue
+                    if fh_select is not None:
+                        key = float(
+                            fh_select(sequence, soft["phis_deg"], soft["psis_deg"])
+                            or -1e9
+                        )
+                    else:
+                        key = float(soft.get("select_score", soft["best_rank"]))
+                    if best_soft is None or key > best_key:
+                        best_soft = soft
+                        best_tag = f"{map_name}@{seed}"
+                        best_key = key
+            if best_soft is None:
+                return list(phis), list(psis), " Soft-map no improve."
+            sel = "fhMAE" if fh_select is not None else "rank"
+            return (
+                [float(x) for x in best_soft["phis_deg"]],
+                [float(x) for x in best_soft["psis_deg"]],
+                (
+                    f" Soft-map {best_tag}/{sel} rank "
+                    f"{best_soft['base_rank']:.2f}->{best_soft['best_rank']:.2f}."
+                ),
+            )
+        except Exception as e:
+            return list(phis), list(psis), f" Soft-map skipped ({type(e).__name__})."
+
+    def _early_contact_fold(
+        self,
+        sequence: str,
+        phis: List[float],
+        psis: List[float],
+        anchors: Optional[List[Tuple[int, int, float]]],
+        contact_info: Optional[Dict] = None,
+        contact_probs: Optional[np.ndarray] = None,
+    ) -> Tuple[List[float], List[float], str, bool]:
+        """
+        Stage-1 scaffold steering: sparse-anchor refine.
+
+        Soft full-map rescue runs later (post lever) via `_soft_map_rescue`.
+        Returns (phis, psis, note, keep_anchors).
+        """
+        if not EARLY_CONTACT_FOLD or len(sequence) > LEVER_ASSEMBLY_MAX_LEN:
+            return phis, psis, "", bool(anchors)
+        if not anchors:
+            return phis, psis, "", False
+        try:
+            from .soft_contact_fold import rank_decoy
+            from .tertiary import score_tertiary
+
+            note_parts: List[str] = []
+            cur_ph, cur_ps = list(phis), list(psis)
+
+            mean_sc = float(contact_info.get("mean_score") or 0.0) if contact_info else 0.0
+            sharp = (
+                mean_sc >= CONTACT_SHARP_MEAN and len(anchors) >= CONTACT_SHARP_MIN_N
+            )
+            scores = None
+            if contact_info:
+                top = contact_info.get("contacts") or []
+                score_map = {
+                    (int(c["i"]), int(c["j"])): float(c["score"]) for c in top
+                }
+                scores = [
+                    score_map.get(
+                        (int(a[0]), int(a[1])),
+                        score_map.get((int(a[1]), int(a[0])), 0.5),
+                    )
+                    for a in anchors
+                ]
+
+            from .contact_ca_fold import ca_contact_scaffold
+            from .contact_fold import early_contact_fold
+
+            base_ph, base_ps = list(cur_ph), list(cur_ps)
+            # Prefer soft-aware ranking when probs available
+            if contact_probs is not None:
+                base_score = rank_decoy(sequence, base_ph, base_ps, contact_probs)
+            else:
+                base_score = score_tertiary(sequence, base_ph, base_ps, anchors=None)["total"]
+
+            fh_select = None
+            if USE_FOLD_HEAD_SELECT:
+                try:
+                    from .fold_head_infer import decoy_distance_score, load_fold_head
+
+                    if load_fold_head() is not None:
+                        fh_select = decoy_distance_score
+                        d0 = fh_select(sequence, base_ph, base_ps)
+                        if d0 is not None:
+                            base_score = base_score + 0.35 * float(d0)
+                except Exception:
+                    fh_select = None
+
+            # Keep proven settings for sharp maps (aggressive boost/top-k regressed)
+            seeds = [3, 17] if sharp else [3]
+            best_ph, best_ps = list(base_ph), list(base_ps)
+            best_score = base_score
+            for seed in seeds:
+                cand_ph, cand_ps = list(base_ph), list(base_ps)
+                if mean_sc >= 0.70 and len(anchors) >= 3:
+                    ca_fold = ca_contact_scaffold(
+                        sequence,
+                        cand_ph,
+                        cand_ps,
+                        anchors,
+                        scores=scores,
+                        ca_steps=900,
+                        fit_steps=1800,
+                        seed=seed,
+                        contact_boost=2.0,
+                    )
+                    if ca_fold["improved"]:
+                        cand_ph = [float(x) for x in ca_fold["phis_deg"]]
+                        cand_ps = [float(x) for x in ca_fold["psis_deg"]]
+                        note_parts.append(f" CA-fold@{seed} ok.")
+                folded = early_contact_fold(
+                    sequence,
+                    cand_ph,
+                    cand_ps,
+                    anchors,
+                    scores=scores,
+                    n_restarts=EARLY_CONTACT_RESTARTS,
+                    steps_per_restart=EARLY_CONTACT_STEPS,
+                    seed=7 if not sharp else seed + 7,
+                )
+                e0 = float(folded["anchor_energy_before"])
+                e1 = float(folded["anchor_energy_after"])
+                accept = folded["improved"] and (
+                    e0 <= 1e-6 or e1 < EARLY_CONTACT_ACCEPT_RATIO * e0
+                )
+                if accept:
+                    cand_ph = [float(x) for x in folded["phis_deg"]]
+                    cand_ps = [float(x) for x in folded["psis_deg"]]
+                if contact_probs is not None:
+                    sc = rank_decoy(sequence, cand_ph, cand_ps, contact_probs)
+                else:
+                    sc = score_tertiary(sequence, cand_ph, cand_ps, anchors=None)["total"]
+                # Blend fold-head distance agreement (scaled) into selection
+                if fh_select is not None:
+                    dscore = fh_select(sequence, cand_ph, cand_ps)
+                    if dscore is not None:
+                        sc = sc + 0.35 * float(dscore)
+                if sc > best_score + 0.08:
+                    best_score = sc
+                    best_ph, best_ps = cand_ph, cand_ps
+                    note_parts.append(f" seed{seed} kept({sc:.2f}).")
+
+            if best_score > base_score + 0.08:
+                note_parts.append(
+                    f" Dual-path kept fold ({best_score:.2f}>{base_score:.2f})."
+                )
+                return best_ph, best_ps, "".join(note_parts), True
+            note_parts.append(
+                f" Dual-path kept base ({base_score:.2f}>={best_score:.2f})."
+            )
+            return base_ph, base_ps, "".join(note_parts), True
+        except Exception as e:
+            return phis, psis, f" Early-contact-fold skipped ({type(e).__name__}).", bool(anchors)
 
     def _prior_boost(self, seq: str) -> float:
         c = self.seq_prior.get(seq, 0)
@@ -359,9 +717,40 @@ class FragmentPredictor:
             contact_info = self.predict_contacts(seq)
             if contact_info.get("enabled") and contact_info.get("anchors"):
                 anchors = [tuple(a) for a in contact_info["anchors"]]  # type: ignore[misc]
-            if anchors:
+            # Gate weak / sparse maps — they often worsen RMSD (e.g. 1CRN)
+            mean_sc = float(contact_info.get("mean_score") or 0.0)
+            n_anc = len(anchors or [])
+            if anchors and (n_anc < CONTACT_GATE_MIN_N or mean_sc < CONTACT_GATE_MIN_MEAN):
+                # Sparse t12: try optional t30 rescue before giving up (helps 1CRN-like)
+                rescued = False
+                if USE_ESM_ALT_CONTACTS:
+                    cp = self._get_contact_predictor()
+                    if cp is not None and hasattr(cp, "top_anchors_alt"):
+                        alt = cp.top_anchors_alt(seq)
+                        alt_n = len(alt.get("anchors") or [])
+                        alt_m = float(alt.get("mean_score") or 0.0)
+                        if alt_n >= CONTACT_GATE_MIN_N and alt_m >= CONTACT_GATE_MIN_MEAN:
+                            anchors = [tuple(a) for a in alt["anchors"]]
+                            contact_info = dict(alt)
+                            contact_info["rescued_from"] = "t12_gated"
+                            mean_sc = alt_m
+                            n_anc = alt_n
+                            rescued = True
+                            contact_note = (
+                                f" Contacts={n_anc} rescued via t30 (mean {mean_sc:.2f})."
+                            )
+                if not rescued:
+                    contact_note = (
+                        f" Contacts={n_anc} gated (mean {mean_sc:.2f} too weak/sparse)."
+                    )
+                    anchors = None
+                    contact_info = dict(contact_info)
+                    contact_info["anchors"] = []
+                    contact_info["n_anchors"] = 0
+                    contact_info["gated"] = True
+            elif anchors:
                 contact_note = (
-                    f" Contacts={len(anchors)} (mean score {contact_info.get('mean_score', 0):.2f})."
+                    f" Contacts={len(anchors)} (mean score {mean_sc:.2f})."
                 )
             elif contact_info.get("enabled"):
                 contact_note = " Contacts=0 (below threshold)."
@@ -370,6 +759,21 @@ class FragmentPredictor:
                 f" Contacts skipped (length > {CONTACT_USE_MAX_LEN}; "
                 "anchors only used for short tertiary refine)."
             )
+
+        # Full soft contact map (survives hard-anchor gating; optional t30 rescue)
+        contact_probs: Optional[np.ndarray] = None
+        if len(seq) <= CONTACT_USE_MAX_LEN and USE_SOFT_CONTACT_FOLD:
+            cp = self._get_contact_predictor()
+            if cp is not None and hasattr(cp, "contact_probs"):
+                try:
+                    # Always keep t12 probs; gated soft-fold competes t30 inside fold.
+                    contact_probs = cp.contact_probs(seq, model="primary")
+                    if anchors is None or len(anchors) < CONTACT_GATE_MIN_N:
+                        contact_note += " Soft-map=compete."
+                    else:
+                        contact_note += " Soft-map=t12."
+                except Exception:
+                    contact_probs = None
 
         calib_note = (
             f"calibrated={self.calibrator.enabled}/{self.calibrator.method}"
@@ -394,7 +798,8 @@ class FragmentPredictor:
                         "open 3D window to rebuild from torsions."
                     ),
                 }
-            return build_backbone(seq, phis, psis)
+            bb = build_backbone(seq, phis, psis)
+            return _maybe_all_atom(seq, phis, psis, bb)
 
         def maybe_tertiary(phis, psis, confs, lo=0.88, hi=0.96):
             """Refine/rank tertiary for ≤TERTIARY_MAX_LEN; return angles + meta."""
@@ -422,14 +827,48 @@ class FragmentPredictor:
             except Exception as e:
                 return list(phis), list(psis), confs, None, f" Tertiary skipped ({type(e).__name__})."
 
+        early_note = ""
         if len(seq) <= MAX_LEN:
             report(0.05, "Short peptide — refining windows")
             if len(seq) >= MIN_LEN + 1:
                 refined = self._overlap_refine(
-                    seq, progress=lambda t, m: report(0.05 + 0.75 * t, m)
+                    seq, progress=lambda t, m: report(0.05 + 0.70 * t, m)
                 )
+                report(0.76, "Early contact-guided fold")
+                phis, psis, early_note, keep_anc = self._early_contact_fold(
+                    seq,
+                    refined["phis"],
+                    refined["psis"],
+                    anchors,
+                    contact_info,
+                    contact_probs=contact_probs,
+                )
+                if not keep_anc:
+                    anchors = None
+                # Lever polish with anchors after early fold
+                if anchors and len(seq) <= LEVER_ASSEMBLY_MAX_LEN:
+                    try:
+                        from .clash_assembly import correct_lever_effect
+
+                        polished = correct_lever_effect(
+                            seq, phis, psis, lookahead=4, relax_steps=20, anchors=anchors
+                        )
+                        phis = [float(x) for x in polished["phis_deg"]]
+                        psis = [float(x) for x in polished["psis_deg"]]
+                        early_note += f" Lever-polish repairs={polished['repairs']}."
+                    except Exception:
+                        pass
+                phis, psis, fh_note = self._fold_head_refine(
+                    seq, phis, psis, contact_probs, anchors=anchors
+                )
+                early_note += fh_note
+                if (not anchors) and contact_probs is not None:
+                    phis, psis, soft_note = self._soft_map_rescue(
+                        seq, phis, psis, contact_probs
+                    )
+                    early_note += soft_note
                 phis, psis, confs, tmeta, tnote = maybe_tertiary(
-                    refined["phis"], refined["psis"], refined["confidence"], lo=0.82, hi=0.95
+                    phis, psis, refined["confidence"], lo=0.82, hi=0.95
                 )
                 report(0.96, "Building 3D backbone")
                 structure = maybe_structure(phis, psis)
@@ -463,7 +902,7 @@ class FragmentPredictor:
                     "device": str(self.dev),
                     "note": (
                         f"PDB-trained torsion model with overlap consensus ({calib_note})."
-                        f"{contact_note}{tnote} Not AlphaFold."
+                        f"{contact_note}{early_note}{tnote} Not AlphaFold."
                     ),
                     "contacts": {
                         "enabled": bool(contact_info.get("enabled")),
@@ -474,6 +913,7 @@ class FragmentPredictor:
                         "top": contact_info.get("contacts") or [],
                         "mean_score": contact_info.get("mean_score", 0.0),
                         "ckpt": contact_info.get("ckpt", ""),
+                        "source": contact_info.get("source", ""),
                     },
                 }
                 if tmeta:
@@ -482,8 +922,27 @@ class FragmentPredictor:
 
             report(0.3, "Direct fragment predict")
             frag = self.predict_fragment(seq)
+            phis, psis, early_note, keep_anc = self._early_contact_fold(
+                seq,
+                frag["phis_deg"],
+                frag["psis_deg"],
+                anchors,
+                contact_info,
+                contact_probs=contact_probs,
+            )
+            if not keep_anc:
+                anchors = None
+            phis, psis, fh_note = self._fold_head_refine(
+                seq, phis, psis, contact_probs, anchors=anchors
+            )
+            early_note += fh_note
+            if (not anchors) and contact_probs is not None:
+                phis, psis, soft_note = self._soft_map_rescue(
+                    seq, phis, psis, contact_probs
+                )
+                early_note += soft_note
             phis, psis, confs, tmeta, tnote = maybe_tertiary(
-                frag["phis_deg"], frag["psis_deg"], frag["confidence"], lo=0.55, hi=0.92
+                phis, psis, frag["confidence"], lo=0.55, hi=0.92
             )
             report(0.95, "Building 3D backbone")
             structure = maybe_structure(phis, psis)
@@ -516,7 +975,7 @@ class FragmentPredictor:
                 "device": str(self.dev),
                 "note": (
                     f"PDB-trained short-fragment model ({calib_note})."
-                    f"{contact_note}{tnote} Not AlphaFold."
+                    f"{contact_note}{early_note}{tnote} Not AlphaFold."
                 ),
                 "contacts": {
                     "enabled": bool(contact_info.get("enabled")),
@@ -527,6 +986,7 @@ class FragmentPredictor:
                     "top": contact_info.get("contacts") or [],
                     "mean_score": contact_info.get("mean_score", 0.0),
                     "ckpt": contact_info.get("ckpt", ""),
+                    "source": contact_info.get("source", ""),
                 },
             }
             if tmeta:
@@ -618,6 +1078,21 @@ class FragmentPredictor:
                 psis[idx] = refined["psis"][k]
                 confs[idx] = refined["confidence"][k]
 
+        # Phase C: early contact-guided fold BEFORE clash look-ahead / SS
+        early_note = ""
+        if (anchors or contact_probs is not None) and len(seq) <= LEVER_ASSEMBLY_MAX_LEN:
+            report(0.74, "Early contact-guided fold")
+            phis, psis, early_note, keep_anc = self._early_contact_fold(
+                seq,
+                phis,
+                psis,
+                anchors,
+                contact_info,
+                contact_probs=contact_probs,
+            )
+            if not keep_anc:
+                anchors = None
+
         # Clash-aware look-ahead assembly + lever correction (bounded length)
         asm_note = ""
         if len(seq) <= LEVER_ASSEMBLY_MAX_LEN:
@@ -676,7 +1151,7 @@ class FragmentPredictor:
                     slots,
                     lookahead=4,
                     relax_on_clash=True,
-                    max_nodes=20_000,
+                    max_nodes=3_000,
                     anchors=anchors,
                 )
                 phis = [float(x) for x in asm.phis_deg]
@@ -734,7 +1209,7 @@ class FragmentPredictor:
         guard_rss("after_ss_stage")
 
         # Final O(N) lever polish after SS freeze so corrections are not overwritten
-        if len(seq) <= LEVER_ASSEMBLY_MAX_LEN:
+        if USE_LEVER_POLISH and len(seq) <= LEVER_ASSEMBLY_MAX_LEN:
             try:
                 from .clash_assembly import correct_lever_effect
 
@@ -751,6 +1226,19 @@ class FragmentPredictor:
                 )
             except Exception:
                 pass
+
+        # Learned fold-head (all maps) then gated soft-map — both AFTER assembly/SS
+        if len(seq) <= LEVER_ASSEMBLY_MAX_LEN:
+            report(0.86, "ESM fold-head refine")
+            phis, psis, fh_note = self._fold_head_refine(
+                seq, phis, psis, contact_probs, anchors=anchors
+            )
+            early_note = (early_note or "") + fh_note
+        soft_note = ""
+        if (not anchors) and contact_probs is not None and len(seq) <= LEVER_ASSEMBLY_MAX_LEN:
+            report(0.88, "Soft-map contact rescue")
+            phis, psis, soft_note = self._soft_map_rescue(seq, phis, psis, contact_probs)
+            early_note = (early_note or "") + soft_note
 
         tmeta = None
         tnote = ""
@@ -796,7 +1284,7 @@ class FragmentPredictor:
             "note": (
                 f"{'Greedy tiles' if use_fast_tiles else 'Segmented'} + "
                 f"{'direct tile predict' if use_fast_tiles else 'overlap consensus'} + "
-                f"{calib_note}.{contact_note}{asm_note}{ss_note}{tnote} "
+                f"{calib_note}.{contact_note}{early_note}{asm_note}{ss_note}{tnote} "
                 "Local assembly — not AlphaFold."
             ),
             "contacts": {
@@ -808,6 +1296,7 @@ class FragmentPredictor:
                 "top": contact_info.get("contacts") or [],
                 "mean_score": contact_info.get("mean_score", 0.0),
                 "ckpt": contact_info.get("ckpt", ""),
+                "source": contact_info.get("source", ""),
             },
         }
         if tmeta:

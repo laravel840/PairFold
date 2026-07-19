@@ -7,7 +7,7 @@ so each case tiles a real short domain to length ≥ MIN_LEN and scores accuracy
 mean Kabsch Cα RMSD of each tile against that domain's experimental structure.
 
 Run:
-  python benchmark_long.py
+  python benchmarks/benchmark_long.py
 """
 
 from __future__ import annotations
@@ -21,9 +21,12 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+BENCH_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BENCH_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+if str(BENCH_DIR) not in sys.path:
+    sys.path.insert(0, str(BENCH_DIR))
 
 from Bio.PDB.PDBExceptions import PDBConstructionWarning  # noqa: E402
 
@@ -55,7 +58,7 @@ SEED_PDBS = [
     "2JVD",  # WW domain
 ]
 
-OUT_CSV = ROOT / "benchmark_long_results.csv"
+OUT_CSV = BENCH_DIR / "results" / "benchmark_long_results.csv"
 
 
 def tile_to_length(seq: str, native_ca: np.ndarray, min_len: int) -> Tuple[str, np.ndarray, int]:

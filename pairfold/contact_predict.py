@@ -1,4 +1,4 @@
-"""ContactPairNet inference helpers: logits → top-k distance anchors."""
+"""Contact inference helpers: ESM-2 (preferred) or ContactPairNet → top-k anchors."""
 
 from __future__ import annotations
 
@@ -21,8 +21,14 @@ from .config import (
     CONTACT_N_LAYERS,
     CONTACT_SCORE_THRESH,
     CONTACT_TOP_K,
+    ESM_ALT_MODEL_NAME,
+    ESM_CONTACT_SCORE_THRESH,
+    ESM_CONTACT_TOP_K,
+    ESM_MODEL_NAME,
     PAD_IDX,
     UNK_IDX,
+    USE_ESM_ALT_CONTACTS,
+    USE_ESM_CONTACTS,
     VOCAB_SIZE,
 )
 from .model.contact_net import ContactPairNet
@@ -34,16 +40,39 @@ def _aa_to_idx(ch: str) -> int:
 
 
 class ContactPredictor:
-    """Lazy-loaded ContactPairNet → sparse (i, j, dist) anchors."""
+    """
+    Prefer ESM-2 pretrained contacts when USE_ESM_CONTACTS is True.
+    Fall back to trained ContactPairNet checkpoint.
+    """
 
     def __init__(self, ckpt_path: Optional[Path] = None, device: Optional[torch.device] = None) -> None:
         self.dev = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        path = Path(ckpt_path or CKPT_DIR / CONTACT_CKPT_NAME)
-        self.enabled = path.exists()
-        self.ckpt_path = str(path) if self.enabled else ""
+        self.source = "none"
+        self.enabled = False
+        self.ckpt_path = ""
         self.model: Optional[ContactPairNet] = None
         self.max_len = CONTACT_INFER_MAX_LEN
         self.min_sep = CONTACT_MIN_SEP
+        self._esm = None
+        self._esm_alt = None
+
+        if USE_ESM_CONTACTS:
+            try:
+                from .esm_contacts import get_esm_predictor
+
+                self._esm = get_esm_predictor(ESM_MODEL_NAME, device=self.dev)
+                if self._esm.enabled:
+                    self.enabled = True
+                    self.source = "esm"
+                    self.ckpt_path = f"esm:{ESM_MODEL_NAME}"
+                    # t30 loaded lazily in top_anchors_alt() to save VRAM
+                    return
+            except Exception as e:
+                print(f"[contact] ESM unavailable ({type(e).__name__}: {e}); falling back")
+
+        path = Path(ckpt_path or CKPT_DIR / CONTACT_CKPT_NAME)
+        self.ckpt_path = str(path) if path.exists() else ""
+        self.enabled = path.exists()
         if not self.enabled:
             return
         ckpt = torch.load(path, map_location=self.dev)
@@ -61,6 +90,7 @@ class ContactPredictor:
         ).to(self.dev)
         self.model.load_state_dict(ckpt["model"])
         self.model.eval()
+        self.source = "contact_pair_net"
 
     def _forward_window(self, seq: str) -> Tuple[np.ndarray, np.ndarray]:
         assert self.model is not None
@@ -76,26 +106,54 @@ class ContactPredictor:
         dist_np = dist[0, :L, :L].float().cpu().numpy()
         return logits_np, dist_np
 
-    def predict_maps(self, sequence: str) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Returns (contact_prob LxL, dist_pred LxL) for short chains only.
-
-        For N > max_len this used to allocate three N×N float32 matrices
-        (≈ 3 × N² × 4 bytes — ~7.5 GB at N=25k). Callers that need anchors
-        on long chains must use top_anchors() which stays sparse.
-        """
+    def contact_probs(
+        self, sequence: str, model: str = "primary"
+    ) -> np.ndarray:
+        """Full L×L contact probability matrix from ESM (or zeros)."""
         seq = "".join(ch for ch in sequence.upper() if ch.isalpha())
         n = len(seq)
-        if not self.enabled or self.model is None or n < self.min_sep + 1:
+        z = np.zeros((n, n), dtype=np.float32)
+        if n < 2:
+            return z
+        if model == "alt":
+            if not USE_ESM_ALT_CONTACTS:
+                return z
+            if self._esm_alt is None:
+                try:
+                    from .esm_contacts import get_esm_predictor
+
+                    self._esm_alt = get_esm_predictor(ESM_ALT_MODEL_NAME, device=self.dev)
+                except Exception:
+                    return z
+            if self._esm_alt is None or not self._esm_alt.enabled:
+                return z
+            return self._esm_alt.contact_probs(seq)
+        if self._esm is not None and self.source == "esm":
+            return self._esm.contact_probs(seq)
+        return z
+
+    def predict_maps(self, sequence: str) -> Tuple[np.ndarray, np.ndarray]:
+        seq = "".join(ch for ch in sequence.upper() if ch.isalpha())
+        n = len(seq)
+        if not self.enabled or n < self.min_sep + 1:
             z = np.zeros((n, n), dtype=np.float32)
             return z, z.copy()
 
-        if n > self.max_len:
+        if self._esm is not None and self.source == "esm":
+            probs = self._esm.contact_probs(seq)
+            # Synthetic distance map from contact probs
+            dist = np.full((n, n), 12.0, dtype=np.float32)
+            for i in range(n):
+                for j in range(n):
+                    p = float(probs[i, j])
+                    dist[i, j] = float(min(max(7.0 - 1.2 * max(0.0, p - 0.5), 4.5), 14.0))
+            return probs, dist
+
+        if self.model is None or n > self.max_len:
             raise ValueError(
                 f"predict_maps refuses N={n} > max_len={self.max_len}; "
                 "use top_anchors() for sparse long-chain inference"
             )
-
         logits, dist = self._forward_window(seq)
         return 1.0 / (1.0 + np.exp(-logits)), dist
 
@@ -107,7 +165,6 @@ class ContactPredictor:
         score_thresh: float,
         keep: int,
     ) -> List[Tuple[float, int, int, float]]:
-        """Top contacts inside one crop, mapped to global indices."""
         logits, dist = self._forward_window(seq)
         L = len(seq)
         probs = 1.0 / (1.0 + np.exp(-logits))
@@ -125,17 +182,27 @@ class ContactPredictor:
     def top_anchors(
         self,
         sequence: str,
-        top_k: int = CONTACT_TOP_K,
-        score_thresh: float = CONTACT_SCORE_THRESH,
+        top_k: Optional[int] = None,
+        score_thresh: Optional[float] = None,
         min_sep: Optional[int] = None,
     ) -> Dict:
-        """
-        Select top-k long-range contacts as (i, j, target_dist_Å) anchors.
+        """Select top-k long-range contacts as (i, j, target_dist_Å) anchors."""
+        if self._esm is not None and self.source == "esm":
+            return self._esm.top_anchors(
+                sequence,
+                top_k=int(top_k if top_k is not None else ESM_CONTACT_TOP_K),
+                score_thresh=float(
+                    score_thresh if score_thresh is not None else ESM_CONTACT_SCORE_THRESH
+                ),
+                min_sep=int(min_sep if min_sep is not None else self.min_sep),
+            )
 
-        Long chains use overlapping crops and a bounded heap — never N×N maps.
-        """
         seq = "".join(ch for ch in sequence.upper() if ch.isalpha())
         n = len(seq)
+        top_k = int(top_k if top_k is not None else CONTACT_TOP_K)
+        score_thresh = float(
+            score_thresh if score_thresh is not None else CONTACT_SCORE_THRESH
+        )
         min_sep = int(min_sep if min_sep is not None else self.min_sep)
         empty = {
             "enabled": self.enabled,
@@ -144,11 +211,11 @@ class ContactPredictor:
             "n_candidates": 0,
             "mean_score": 0.0,
             "ckpt": self.ckpt_path,
+            "source": self.source,
         }
         if not self.enabled or self.model is None or n < min_sep + 1:
             return empty
 
-        # Min-heap of (score, i, j, dist); keep more than top_k for the API list
         pool_k = max(int(top_k) * 4, 50)
         heap: List[Tuple[float, int, int, float]] = []
 
@@ -192,5 +259,49 @@ class ContactPredictor:
             "n_candidates": len(candidates),
             "mean_score": float(np.mean([c[0] for c in chosen])) if chosen else 0.0,
             "ckpt": self.ckpt_path,
+            "source": self.source,
             "top_k": k,
         }
+
+    def top_anchors_alt(
+        self,
+        sequence: str,
+        top_k: Optional[int] = None,
+        score_thresh: Optional[float] = None,
+        min_sep: Optional[int] = None,
+    ) -> Dict:
+        """Optional secondary ESM (e.g. t30) anchors for ensemble competition only."""
+        empty = {
+            "enabled": False,
+            "anchors": [],
+            "contacts": [],
+            "n_candidates": 0,
+            "mean_score": 0.0,
+            "ckpt": "",
+            "source": "none",
+        }
+        if not USE_ESM_ALT_CONTACTS or ESM_ALT_MODEL_NAME == ESM_MODEL_NAME:
+            return empty
+        if self._esm_alt is None:
+            try:
+                from .esm_contacts import get_esm_predictor
+
+                self._esm_alt = get_esm_predictor(ESM_ALT_MODEL_NAME, device=self.dev)
+            except Exception as e:
+                print(
+                    f"[contact] ESM alt {ESM_ALT_MODEL_NAME} unavailable "
+                    f"({type(e).__name__}); skipping"
+                )
+                return empty
+        if not getattr(self._esm_alt, "enabled", False):
+            return empty
+        out = self._esm_alt.top_anchors(
+            sequence,
+            top_k=int(top_k if top_k is not None else ESM_CONTACT_TOP_K),
+            score_thresh=float(
+                score_thresh if score_thresh is not None else ESM_CONTACT_SCORE_THRESH
+            ),
+            min_sep=int(min_sep if min_sep is not None else self.min_sep),
+        )
+        out["source"] = f"esm_alt:{ESM_ALT_MODEL_NAME}"
+        return out

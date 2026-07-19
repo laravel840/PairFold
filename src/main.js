@@ -52,10 +52,16 @@ function show3DFor(view) {
 function stageHTML(view, ariaLabel, hint) {
   if (show3DFor(view)) {
     const n = sequenceLength(view);
+    const inline = n <= 256;
     return `
-      <div class="detail__stage detail__stage--launch">
+      <div class="detail__stage detail__stage--launch${inline ? " detail__stage--inline3d" : ""}">
+        ${
+          inline
+            ? `<div class="viewer3d" id="viewer3d-inline" role="img" aria-label="${ariaLabel}"></div>`
+            : ""
+        }
         <button type="button" class="btn-3d" id="btn-open-3d" aria-label="${ariaLabel}">
-          Open 3D structure
+          ${inline ? "Open larger 3D window" : "Open 3D structure"}
         </button>
         <p class="viewer3d__hint">${n} residues · ${hint}</p>
       </div>
@@ -70,11 +76,10 @@ function stageHTML(view, ariaLabel, hint) {
 
 function cloneViewPayload(view) {
   if (!view) return null;
-  // Compact payload for popup (full atom lists blow past sessionStorage quota)
+  // Compact payload for popup (huge atom lists blow past sessionStorage quota)
   try {
     const n = sequenceLength(view);
     const sequence = view.sequence || (view.codes ? view.codes.join("") : "");
-    // For long chains skip expanding codes/abbrs/colors — viewer rebuilds from φ/ψ
     const payload = {
       sequence,
       phis: view.phis,
@@ -93,6 +98,21 @@ function cloneViewPayload(view) {
           : [];
       payload.abbrs = view.abbrs || undefined;
       payload.colors = view.colors || undefined;
+    }
+    // Pass Stage-2/3 all-atom structure for short chains (viewer prefers this)
+    const st = view.structure;
+    const nAtoms = st?.atoms?.length || 0;
+    if (n <= 256 && nAtoms > 0 && !st.skipped_3d) {
+      payload.structure = {
+        atoms: st.atoms,
+        bonds: st.bonds || [],
+        residues: st.residues || [],
+        enabled: st.enabled,
+        stage2: st.stage2 || null,
+        n_atoms: st.n_atoms || nAtoms,
+        note: st.note || "",
+      };
+      payload.allAtom = true;
     }
     if (!payload.phis?.length || !payload.psis?.length) return null;
     return payload;
@@ -391,10 +411,14 @@ function detailHTML() {
               ${metricsHTML(pdb)}
             </dl>
           </div>`;
+    const nAtoms = pdb.structure?.atoms?.length || 0;
+    const allAtom = nAtoms > 0 && n <= 256 && !pdb.structure?.skipped_3d;
     const hint =
       n > 400
         ? "Cα trace in a new window (light mode for long chains)"
-        : "opens in a new window";
+        : allAtom
+          ? `all-atom (${nAtoms} atoms) · sidechains · opens in a new window`
+          : "backbone 3D · opens in a new window";
     return `
       <section class="detail" aria-live="polite">
         ${stageHTML(pdb, "3D tertiary prediction", hint)}
@@ -404,12 +428,13 @@ function detailHTML() {
           <p class="detail__names">${namesLine}</p>
           <p class="detail__motif">${escapeHtml(pdb.note || "PDB fragment model")}</p>
           ${tertiaryHTML(pdb.tertiary)}
+          ${allAtom ? `<p class="detail__motif">Stage-2/3 all-atom: ${nAtoms} atoms${pdb.structure?.stage2?.n_sidechain_atoms != null ? ` · ${pdb.structure.stage2.n_sidechain_atoms} sidechain` : ""}.</p>` : ""}
           ${segmentationHTML(pdb.segmentation, pdb.phis, pdb.psis, n)}
           ${metricsBlock}
           <p class="detail__note">
             Local torsions from PDB fragments; 3D up to ${VIEW_3D_MAX} aa
-            (&gt;400 aa = Cα trace only). Tertiary ranker for ≤1000 aa.
-            Not AlphaFold.
+            (&gt;400 aa = Cα trace only). All-atom sidechains for ≤256 aa.
+            Tertiary ranker for ≤1000 aa. Not AlphaFold.
           </p>
         </div>
       </section>
@@ -448,9 +473,31 @@ function detailHTML() {
   `;
 }
 
-function mountViewer() {
-  // 3D is launched in a separate window on demand — no embedded canvas.
+async function mountViewer() {
   bind3DButton();
+  const host = document.getElementById("viewer3d-inline");
+  if (!host) return;
+  const view = activeView();
+  if (!view?.phis?.length || sequenceLength(view) > 256) return;
+  try {
+    const { destroyPeptide3D, mountPeptide3D } = await import("./viewer3D.js");
+    destroyPeptide3D(host);
+    // Always rebuild all-atom client-side for the inline viewer
+    const payload = {
+      sequence: view.sequence || (view.codes ? view.codes.join("") : ""),
+      phis: view.phis,
+      psis: view.psis,
+      omega: view.omega ?? 180,
+      length: sequenceLength(view),
+      // Force client all-atom path (ignore stripped API backbone-only structure)
+      structure: null,
+      caTrace: false,
+    };
+    mountPeptide3D(host, payload);
+  } catch (err) {
+    host.innerHTML = `<p class="empty">3D failed: ${String(err.message || err)}</p>`;
+    console.error(err);
+  }
 }
 
 function suggestionHTML(list) {
@@ -690,15 +737,24 @@ async function predictPdb() {
     }
 
     if (!result) throw new Error("Stream ended without a result");
-    // Drop heavy unused fields so the UI stays responsive
+    // Keep Stage-2/3 all-atom for short chains; strip heavy payloads for long ones
     if (result.structure) {
-      result.structure = {
-        skipped_3d: result.structure.skipped_3d,
-        reason: result.structure.reason,
-        atoms: [],
-        bonds: [],
-        residues: [],
-      };
+      const n = result.sequence?.length || result.phis?.length || 0;
+      const nAtoms = result.structure.atoms?.length || 0;
+      if (result.structure.skipped_3d || n > 256 || nAtoms === 0) {
+        result.structure = {
+          skipped_3d: result.structure.skipped_3d || n > 256,
+          reason:
+            result.structure.reason ||
+            (n > 256
+              ? "All-atom 3D kept only for ≤256 aa; long chains use φ/ψ rebuild."
+              : undefined),
+          atoms: [],
+          bonds: [],
+          residues: [],
+        };
+      }
+      // else: keep atoms/bonds/residues for all-atom viewer
     }
     pdbResult = result;
     segFilter = "";

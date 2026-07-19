@@ -43,10 +43,14 @@ setup(
             "pandas>=2.0",
             "matplotlib>=3.7",
         ],
+        "esm": [
+            "fair-esm>=2.0.0",
+        ],
         "dev": [
             "requests>=2.31",
             "pandas>=2.0",
             "matplotlib>=3.7",
+            "fair-esm>=2.0.0",
         ],
     },
     entry_points={

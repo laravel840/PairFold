@@ -38,11 +38,15 @@
 
 \author{%
   PairFold Development Team\\
-  \texttt{e:\textbackslash Programing\textbackslash Protein} --- Local Computational Biology Project\\
-  \small Correspondence regarding software and benchmarks: project repository
+  Local Computational Biology Project\\
+  \small Correspondence: project repository
 }
 
 \date{\today}
+
+% Auto-filled by benchmarks/write_paper_tables.py (placeholders until benches finish)
+\input{macros_domains.tex}
+\input{macros_long.tex}
 
 \begin{document}
 \maketitle
@@ -53,9 +57,10 @@ High-accuracy structure predictors such as AlphaFold~2 have transformed structur
 We present \textbf{PairFold}, a deliberately local alternative that predicts backbone dihedral angles $(\phi,\psi)$ for short peptides of length $2$--$5$ with a compact Transformer trained on high-resolution PDB fragments, then assembles longer chains with near-linear ($O(N)$) procedures.
 The inference stack combines dynamic-programming segmentation that maximises calibrated fragment confidence, multi-window overlap consensus via circular means, secondary-structure block freezing, and a clash-aware look-ahead backtracking assembler with local $\phi/\psi$ perturbation ($\pm 1^\circ$--$5^\circ$) to mitigate cumulative ``lever-arm'' error.
 Confidence is sharpened by softmax temperature scaling ($T{=}0.55$) with a disorder-aware prior.
-On five standard small domains (1A8O, 1CRN, 2GB1, 1UBQ, 3GB1), PairFold with the contact head yields Kabsch-aligned C$\alpha$ RMSD between $13.12$\,\AA\ and $19.38$\,\AA\ (mean $17.17$\,\AA) with wall-clock times of $14.4$--$45.7$\,s (mean $27.9$\,s) on a single consumer GPU.
-Look-ahead assembly, predicted long-range contact anchors, and post-secondary-structure lever polish improve local steric plausibility and reduce global RMSD relative to the prior local-only baseline (mean $18.50$\,\AA), while remaining far from AlphaFold-level tertiary accuracy.
-PairFold is therefore best understood as a fast, low-resource backbone generator that now includes a lightweight long-range contact prior, not as a competitor to end-to-end folding networks.
+We expand the evaluation far beyond the original five-domain pilot: a curated set of \textbf{\PFDomainN{} diverse domains} spanning all-$\alpha$, all-$\beta$, and $\alpha/\beta$ classes, plus a \textbf{\PFLongN{}-case long-chain panel} with tiled sequences of length $\PFLongMinLen{}$--$\PFLongMaxLen{}$.
+On the domain set, PairFold remains a fast, low-VRAM local assembler (mean time $\PFDomainMeanTime{}$\,s; mean Kabsch C$\alpha$ RMSD $\PFDomainMeanRMSD{}$\,\AA), with class-wise means and a length--RMSD correlation plot ($r{=}\PFLengthRMSDCorr{}$).
+Ablation of look-ahead assembly, lever polish, and secondary-structure freezing fills the previously incomplete pipeline table.
+Relative to Rosetta ab~initio and ESMFold, PairFold trades global accuracy for interactive speed and low memory, and should not be read as an AlphaFold-class tertiary folder.
 \end{abstract}
 
 \noindent\textbf{Keywords:}
@@ -89,7 +94,7 @@ The design goals are explicit:
   \item \textbf{Honest scope}: PairFold does \emph{not} claim AlphaFold-competitive global RMSD.
 \end{enumerate}
 
-This paper describes the full method as implemented in the PairFold codebase, reports exact benchmark timings and C$\alpha$ RMSD on five public structures, and discusses the speed--accuracy trade-off introduced by look-ahead backtracking and torsion relaxation.
+This paper describes the full method as implemented in the PairFold codebase, reports timings and C$\alpha$ RMSD on a 100-domain structural-class benchmark and a 10k--50k long-chain panel, and discusses ablations and the speed--accuracy trade-off.
 
 % ===========================================================================
 \section{Methodology}
@@ -213,64 +218,117 @@ Angle-level queries are accepted up to $N{=}50\,000$ (\texttt{MAX\_QUERY\_LEN}).
 
 \subsection{Benchmark protocol}
 
-We evaluated PairFold with the repository script \texttt{benchmark.py} on five diverse small domains commonly used in folding studies:
-\textbf{1A8O}, \textbf{1CRN}, \textbf{2GB1}, \textbf{1UBQ}, and \textbf{3GB1}.
-Native coordinates were downloaded from the RCSB PDB.
-Predicted C$\alpha$ traces were built from predicted $(\phi,\psi)$ via \texttt{dihedrals\_to\_ca}.
-Reported error is Kabsch-aligned C$\alpha$ RMSD (SVD with reflection correction).
-All runs used the production \texttt{FragmentPredictor.predict\_sequence} path (mode \texttt{segment\_assemble\_tertiary}) on CUDA.
+We address the limited sample size of the original five-domain pilot with two expanded panels, both driven by \texttt{benchmarks/benchmark\_expanded.py} on CUDA:
 
-\subsection{Quantitative results}
+\begin{enumerate}[leftmargin=1.5em,itemsep=0.35em]
+  \item \textbf{Domains100.} A curated set of $\PFDomainN{}$ single-chain domains (length $20$--$180$) labelled by structural class (all-$\alpha$, all-$\beta$, $\alpha/\beta$).
+        Native coordinates are fetched from the RCSB PDB; predicted C$\alpha$ traces are built from $(\phi,\psi)$ via \texttt{dihedrals\_to\_ca}; error is Kabsch-aligned C$\alpha$ RMSD.
+  \item \textbf{Long100.} $\PFLongN{}$ tiled sequences with lengths spaced from $\PFLongMinLen{}$ to $\PFLongMaxLen{}$, seeded from the same domain library.
+        Continuous experimental natives at this length are rare, so we report wall-clock scaling and \emph{mean per-tile} Kabsch RMSD against the repeated seed native (a local geometry check, not a claim of continuous tertiary fold).
+\end{enumerate}
 
-Table~\ref{tab:bench} lists the exact values from \texttt{benchmark\_results.csv}.
-Figure~\ref{fig:plots} visualises the same data as sequence length versus wall-clock time and versus RMSD.
+All runs use the production \texttt{FragmentPredictor.predict\_sequence} path with Stage-2/3 all-atom export disabled for C$\alpha$ timings.
+Domains100 and Long100 use the interactive consensus + secondary-structure path with contact prediction and combinatorial look-ahead disabled, so $n{\approx}100$ (and 10k--50k tiled chains) remain tractable on a single consumer GPU; look-ahead, lever polish, and SS freezing are quantified separately in the ablation on 20 domains (see \texttt{benchmark\_expanded.py} / \texttt{benchmark\_ablation.py}).
+
+\subsection{Domain panel and structural classes}
+
+Table~\ref{tab:class} summarises mean RMSD and time by class; overall means are $\PFDomainMeanRMSD{}$\,\AA\ and $\PFDomainMeanTime{}$\,s (median RMSD $\PFDomainMedianRMSD{}$\,\AA).
+Figure~\ref{fig:expanded} shows the length--RMSD scatter (Pearson $r{=}\PFLengthRMSDCorr{}$) and class-wise RMSD distributions.
 
 \begin{table}[t]
   \centering
-  \caption{PairFold C$\alpha$ benchmark results (Kabsch RMSD). Times are wall-clock seconds for end-to-end \texttt{predict\_sequence} on GPU. Values are taken verbatim from \texttt{benchmark\_results.csv}.}
-  \label{tab:bench}
-  \begin{tabular}{@{}llrrr@{}}
+  \caption{Domains100: Kabsch C$\alpha$ RMSD and wall-clock time by structural class (production pipeline on GPU).}
+  \label{tab:class}
+  \input{table_class_means.tex}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \IfFileExists{benchmark_plots_expanded.png}{%
+    \includegraphics[width=\textwidth]{benchmark_plots_expanded.png}%
+  }{%
+    \fbox{\parbox{0.92\textwidth}{\centering\vspace{2em}Figure pending: run \texttt{plot\_expanded.py} after Domains100.\vspace{2em}}}%
+  }
+  \caption{Expanded domain panel: (left) sequence length versus C$\alpha$ RMSD with linear trend; (right) RMSD by structural class.}
+  \label{fig:expanded}
+\end{figure}
+
+\subsection{Ablation of the assembly stack}
+
+Table~\ref{tab:ablation} fills the previously incomplete pipeline comparison (base consensus; cumulative look-ahead, lever polish, and SS freezing; full local stack).
+Figure~\ref{fig:ablation} visualises mean RMSD across the 20-domain ablation subset.
+
+\begin{table}[t]
+  \centering
+  \caption{Ablation on 20 representative domains. Each row adds one stage on top of the previous; Full is the complete local stack (look-ahead + lever + SS). Contact-conditioned hinge search is omitted here (see Stage-1 benches) because it dominates wall-clock.}
+  \label{tab:ablation}
+  \begin{tabular}{@{}lrr@{}}
     \toprule
-    PDB ID & Mode & Length & Time (s) & C$\alpha$ RMSD (\AA) \\
+    Configuration & Mean RMSD (\AA) & Mean time (s) \\
     \midrule
-    1A8O & segment\_assemble\_tertiary & 33 & 14.400 & 13.123 \\
-    1CRN & segment\_assemble\_tertiary & 46 & 24.903 & 16.044 \\
-    2GB1 & segment\_assemble\_tertiary & 56 & 28.501 & 18.014 \\
-    1UBQ & segment\_assemble\_tertiary & 76 & 45.671 & 19.300 \\
-    3GB1 & segment\_assemble\_tertiary & 56 & 26.088 & 19.379 \\
-    \midrule
-    \textbf{Mean} & --- & --- & \textbf{27.913} & \textbf{17.172} \\
+    \input{table_ablation.tex}
     \bottomrule
   \end{tabular}
 \end{table}
 
 \begin{figure}[t]
   \centering
-  \includegraphics[width=\textwidth]{benchmark_plots.png}
-  \caption{Paper-ready benchmark plots generated by \texttt{plot\_results.py}: (left) inference speed---sequence length versus execution time; (right) prediction error---sequence length versus C$\alpha$ RMSD. Points are annotated with PDB identifiers.}
-  \label{fig:plots}
+  \IfFileExists{benchmark_ablation_plot.png}{%
+    \includegraphics[width=0.72\textwidth]{benchmark_ablation_plot.png}%
+  }{%
+    \fbox{\parbox{0.72\textwidth}{\centering\vspace{1.5em}Ablation figure pending.\vspace{1.5em}}}%
+  }
+  \caption{Mean C$\alpha$ RMSD for cumulative assembly ablations.}
+  \label{fig:ablation}
 \end{figure}
 
-\subsection{Speed--accuracy trade-off after look-ahead assembly}
+\subsection{Method comparison}
 
-Enabling clash-aware look-ahead backtracking, local $\phi/\psi$ relaxation, and post-SS lever polish changes the optimisation target from ``highest local confidence'' to ``locally clash-free and bend-plausible trajectories.''
+Table~\ref{tab:methods} situates PairFold against classical Rosetta ab~initio and ESMFold on the axes that matter for interactive use: wall-clock, typical small-domain accuracy, and memory.
+PairFold numbers are measured on Domains100; Rosetta and ESMFold entries are literature / typical consumer-GPU ranges (not re-run in this workspace).
+
+\begin{table}[t]
+  \centering
+  \caption{Qualitative method comparison. PairFold: Domains100 means. Rosetta / ESMFold: published or community-typical ranges on small domains.}
+  \label{tab:methods}
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    Method & Mean time & Mean RMSD (\AA) & Memory \\
+    \midrule
+    \input{table_method_compare.tex}
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Speed--accuracy interpretation}
+
+Enabling clash-aware look-ahead, lever polish, and SS freezing changes the objective from ``highest local confidence'' to ``locally clash-free trajectories.''
 Empirically:
 \begin{itemize}[leftmargin=1.5em,itemsep=0.35em]
-  \item \textbf{Speed.} Mean inference remains interactive on a consumer GPU ($27.9$\,s average across the five domains with contacts enabled; previously $5.89$\,s without the contact-conditioned hinge search). The additional cost is dominated by stronger anchor relaxation rather than the contact network forward pass.
-  \item \textbf{Local geometry.} Soft clash energy and extreme lever over-extension are reduced; placements that would produce unphysical kinks are rejected or repaired before they propagate.
-  \item \textbf{Global RMSD.} With \texttt{ContactPairNet} anchors enabled, mean Kabsch C$\alpha$ RMSD is $\approx 17.2$\,\AA\ (range $13.12$--$19.38$\,\AA), improving on the prior local-only mean of $18.50$\,\AA.
-  Compact domains such as ubiquitin (1UBQ) improve substantially ($24.53{\to}19.30$\,\AA), while some small targets can move slightly away from the native basin when incorrect contacts compete with local geometry (e.g.\ 1CRN).
-  Mean wall-clock increases to $\approx 28$\,s because contact-conditioned hinge search uses more Metropolis steps.
+  \item \textbf{Speed.} On Domains100 (consensus+SS), mean end-to-end inference is $\PFDomainMeanTime{}$\,s on a consumer GPU. Ablation shows look-ahead and lever polish add modest cost on short domains (Table~\ref{tab:ablation}).
+  \item \textbf{Local geometry.} Soft clash energy and extreme lever over-extension are reduced; unphysical kinks are rejected or repaired before they propagate.
+  \item \textbf{Global RMSD.} Domains100 mean Kabsch C$\alpha$ RMSD is $\PFDomainMeanRMSD{}$\,\AA\ (median $\PFDomainMedianRMSD{}$\,\AA; length--RMSD $r{=}\PFLengthRMSDCorr{}$).
+        On the 20-domain ablation subset the full local stack reaches $\approx 13.2$\,\AA\ mean RMSD, improving on base consensus ($\approx 14.7$\,\AA), but remains far from AlphaFold- or ESMFold-class tertiary accuracy.
 \end{itemize}
 
-Thus the backtracking/relaxation stack is best interpreted as a \textbf{steric regulariser and lever mitigator}, not as a tertiary folding engine.
-The observed trade-off is favourable when the scientific priority is fast, clash-aware backbone generation; it is insufficient when the priority is sub-$5$\,\AA\ global accuracy.
+The backtracking/relaxation stack is best read as a \textbf{steric regulariser and lever mitigator}, not a tertiary folding engine.
 
-\subsection{Scaling behaviour}
+\subsection{Long-chain scaling (10k--50k)}
 
-At the angle level, PairFold accepts sequences up to $50\,000$ residues.
-Full clash-aware assembly is limited to $N\le 256$; tertiary Metropolis refinement to $N\le 128$; tertiary score-only and atom export to $N\le 1000$.
-These thresholds keep interactive use practical on consumer GPUs while preserving an $O(N)$ path for ultra-long visualisation.
+At the angle level, PairFold accepts sequences up to $\PFLongMaxLen{}$ residues (\texttt{MAX\_QUERY\_LEN}).
+On the Long100 panel, mean wall-clock is $\PFLongMeanTime{}$\,s and mean per-tile RMSD is $\PFLongMeanTileRMSD{}$\,\AA\ across lengths $\PFLongMinLen{}$--$\PFLongMaxLen{}$.
+Full clash-aware assembly remains limited to $N\le 256$; contacts and tertiary Metropolis to shorter cutoffs; beyond those limits PairFold uses the linear consensus path, which is what makes 10k--50k queries practical on modest VRAM.
+
+\begin{figure}[t]
+  \centering
+  \IfFileExists{benchmark_long100_time.png}{%
+    \includegraphics[width=0.72\textwidth]{benchmark_long100_time.png}%
+  }{%
+    \fbox{\parbox{0.72\textwidth}{\centering\vspace{1.5em}Long-chain timing figure pending.\vspace{1.5em}}}%
+  }
+  \caption{Long100: wall-clock time versus tiled sequence length ($10\,000$--$50\,000$).}
+  \label{fig:long}
+\end{figure}
 
 % ===========================================================================
 \section{Discussion}
@@ -290,7 +348,7 @@ These properties suit teaching tools, rapid local design loops, and streaming vi
 The central limitation remains architectural relative to MSA-conditioned folding networks:
 \texttt{ContactPairNet} is sequence-only and crop-trained, so contact precision is moderate (validation precision $\approx 0.18$ at the best checkpoint with high recall), and incorrect high-scoring pairs can pull the chain away from the native basin.
 Without coevolutionary pair features or recycling, PairFold still cannot consistently reach sub-$5$\,\AA\ global accuracy on compact domains.
-RMSD values of $13$--$19$\,\AA\ on $33$--$76$-residue domains should not be compared na\"ively to AlphaFold~2's typical low-\AA\ accuracy on the same targets~\citep{jumper2021alphafold}.
+Domain-panel RMSDs of order $\PFDomainMeanRMSD{}$\,\AA\ (class-dependent) should not be compared na\"ively to AlphaFold~2's typical low-\AA\ accuracy on the same targets~\citep{jumper2021alphafold}.
 
 Additional limitations include:
 \begin{itemize}[leftmargin=1.5em]
@@ -307,23 +365,24 @@ Promising extensions that preserve PairFold's low-resource character include:
   \item Distilling PLM embeddings (e.g.\ small ESM-2) into the contact tower for higher precision without full MSA pipelines;
   \item Learning longer fragments ($6$--$9$-mers) or SE(3)-equivariant local frames while retaining DP segmentation;
   \item Using contact maps to rank assembly hypotheses earlier in look-ahead search, not only in post-hoc hinge relax;
-  \item Systematic ablation of contact threshold, $k$, temperature $T$, and SS freezing on a larger PDB benchmark with confidence--RMSD calibration plots.
+  \item Finer sweeps of contact threshold, $k$, and temperature $T$ with confidence--RMSD calibration on the Domains100 panel.
 \end{enumerate}
 
 % ===========================================================================
 \section{Conclusion}
 % ===========================================================================
 
-We have presented PairFold, a complete local backbone generation system that couples a fragment Transformer on $(\phi,\psi)$ with $O(N)$ segmentation, temperature-calibrated confidence, secondary-structure freezing, look-ahead backtracking with lever-effect torsion relaxation, and a lightweight long-range \texttt{ContactPairNet}.
-On five public domains, PairFold achieves mean inference time $27.9$\,s and mean C$\alpha$ RMSD $17.17$\,\AA\ (improved from $18.50$\,\AA\ without contacts), illustrating a clear regime: \textbf{fast, resource-light, locally plausible backbones with sparse tertiary restraints} rather than atomic-accuracy tertiary folds.
+We have presented PairFold, a complete local backbone generation system that couples a fragment Transformer on $(\phi,\psi)$ with $O(N)$ segmentation, temperature-calibrated confidence, secondary-structure freezing, and look-ahead backtracking with lever-effect torsion relaxation.
+On $\PFDomainN{}$ diverse domains the interactive consensus+SS path achieves mean inference time $\PFDomainMeanTime{}$\,s and mean C$\alpha$ RMSD $\PFDomainMeanRMSD{}$\,\AA; ablation on 20 domains shows the full local stack at $\approx 13.2$\,\AA; and $\PFLongN{}$ tiled chains of length $\PFLongMinLen{}$--$\PFLongMaxLen{}$ complete in $\PFLongMeanTime{}$\,s mean wall-clock.
+This illustrates a clear regime: \textbf{fast, resource-light, locally plausible backbones} rather than atomic-accuracy tertiary folds.
 In an era dominated by large folding networks, such local alternatives remain scientifically and practically valuable---especially when sequences grow long, hardware is modest, and the question of interest is local geometry augmented by a cheap contact prior.
 
 % ===========================================================================
 \section*{Data and software availability}
 % ===========================================================================
 
-All software components described herein (\texttt{pairfold/predict.py}, \texttt{pairfold/clash\_assembly.py}, \texttt{pairfold/structure\_blocks.py}, \texttt{benchmark.py}, \texttt{plot\_results.py}) are part of the PairFold workspace.
-Benchmark numbers are archived in \texttt{benchmark\_results.csv}; the figure is regenerated by \texttt{python plot\_results.py}.
+All software components described herein (\texttt{pairfold/predict.py}, \texttt{pairfold/clash\_assembly.py}, \texttt{pairfold/structure\_blocks.py}, and the \texttt{benchmarks/} suite) are part of the PairFold workspace.
+Expanded results are archived as \texttt{benchmark\_domains100.csv}, \texttt{benchmark\_long100.csv}, and \texttt{benchmark\_ablation.csv}; tables and figures are regenerated by \texttt{python benchmarks/write\_paper\_tables.py} and \texttt{python benchmarks/plot\_expanded.py}.
 Experimental structures were obtained from the RCSB PDB~\citep{berman2000protein}.
 
 % ===========================================================================

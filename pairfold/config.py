@@ -28,6 +28,7 @@ SS_BOUNDARY_OPT_MAX_LEN = 64
 SS_PIPELINE_MAX_LEN = 256
 # Clash-aware backtracking + lever correction (expensive-ish; keep bounded)
 LEVER_ASSEMBLY_MAX_LEN = 256
+USE_LEVER_POLISH = True  # post-SS / post-fold correct_lever_effect
 # ContactPairNet anchors are only consumed by tertiary/lever (≤TERTIARY_MAX_LEN).
 # Never run contacts above this — full NxN maps at 25k aa ≈ 7+ GB and freeze the OS.
 CONTACT_USE_MAX_LEN = TERTIARY_MAX_LEN
@@ -91,8 +92,62 @@ CONTACT_EPOCHS = 20
 CONTACT_LR = 1e-3
 CONTACT_WEIGHT_DECAY = 1e-4
 CONTACT_DIST_LOSS_W = 0.25  # weight on distance regression for true contacts
-CONTACT_TOP_K = 20  # max anchors passed to assembly
-CONTACT_SCORE_THRESH = 0.45  # min sigmoid(logit) to keep
+CONTACT_TOP_K = 40  # max anchors passed to assembly (raised for ESM)
+CONTACT_SCORE_THRESH = 0.45  # min sigmoid(logit) / ESM prob to keep
 CONTACT_CROPS_PER_CHAIN = 4  # random crops written per long chain
 CONTACT_MAX_CHAINS = 2000
 CONTACT_CKPT_NAME = "contact_best.pt"
+
+# ESM-2 contact backbone (Phase B). Prefer pretrained ESM contacts over
+# the lightweight ContactPairNet when fair-esm is available.
+USE_ESM_CONTACTS = True
+ESM_MODEL_NAME = "esm2_t12_35M_UR50D"  # stable default
+ESM_CONTACT_SCORE_THRESH = 0.45
+ESM_CONTACT_TOP_K = 10
+# Early contact-guided fold (Phase C) — before late lever/tertiary polish
+EARLY_CONTACT_FOLD = True
+EARLY_CONTACT_RESTARTS = 4
+EARLY_CONTACT_STEPS = 320  # kept modest: each step rebuilds Cα chain
+# Reject early fold if contact energy does not improve enough
+EARLY_CONTACT_ACCEPT_RATIO = 0.90  # require E_after < 0.90 * E_before
+
+# Stage-1 push: distance-geometry ensemble scaffold
+USE_SCAFFOLD_ENSEMBLE = False  # MDS/mid ensemble regressed; sharp multi-seed path wins
+SCAFFOLD_ENSEMBLE_MEMBERS = 3
+# Optional t30 contacts — only compete in ensemble selection (never blind replace)
+ESM_ALT_MODEL_NAME = "esm2_t30_150M_UR50D"
+USE_ESM_ALT_CONTACTS = True  # soft-map rescue when t12 anchors gated
+# Contact map quality gates
+CONTACT_GATE_MIN_N = 3
+CONTACT_GATE_MIN_MEAN = 0.65
+CONTACT_SHARP_MEAN = 0.90  # sharper maps get multi-seed refine
+CONTACT_SHARP_MIN_N = 8  # need enough anchors; 1A8O(~5) must not use heavy sharp path
+# Soft full-map contact fold (torch CA optimize)
+USE_SOFT_CONTACT_FOLD = True
+SOFT_CONTACT_STEPS = 550
+SOFT_CONTACT_THRESH = 0.10  # gated-only; keep weak signal for 1CRN
+
+# Learned ESM fold head (Stage-1 distance refine on frozen ESM embeddings)
+USE_FOLD_HEAD = False  # direct CA fold hurt RMSD; use FOLD_HEAD_SELECT instead
+USE_FOLD_HEAD_SELECT = True  # rank decoys by predicted-distance MAE (safer)
+FOLD_HEAD_DIR = DATA_DIR / "fold_crops"
+FOLD_HEAD_CKPT_NAME = "fold_head_best.pt"
+FOLD_HEAD_MAX_LEN = 96
+FOLD_HEAD_MIN_LEN = 24
+FOLD_HEAD_EMB_DIM = 480  # esm2_t12_35M
+FOLD_HEAD_D_MODEL = 96
+FOLD_HEAD_PAIR_DIM = 48
+FOLD_HEAD_BATCH_SIZE = 4
+FOLD_HEAD_EPOCHS = 20
+FOLD_HEAD_LR = 1e-3
+FOLD_HEAD_CA_STEPS = 650
+FOLD_HEAD_FIT_STEPS = 1800
+FOLD_HEAD_MAX_CHAINS = 800
+FOLD_HEAD_CROPS_PER_CHAIN = 2
+
+# Stage-2 / Stage-3 all-atom (backbone locked; length-capped for RAM)
+USE_STAGE2_SIDECHAINS = True
+USE_STAGE3_ATOMS = True
+STAGE23_MAX_LEN = 256  # skip packing above this
+STAGE23_ADD_HYDROGENS = False  # heavy atoms + carbonyl O by default
+STAGE23_EXPORT_DIR = EXPORT_DIR / "all_atom"

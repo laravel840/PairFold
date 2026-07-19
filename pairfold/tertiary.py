@@ -83,7 +83,8 @@ def _score_from_ca(
                 continue
             d = float(np.linalg.norm(ca[int(j)] - ca[int(i)]))
             contact_e += (d - float(td)) ** 2
-    w_clash, w_rg, w_hydro, w_contact = 1.0, 2.5, 0.35, 0.08
+    # Stronger contact pull when ESM / DL anchors are present (Phase C)
+    w_clash, w_rg, w_hydro, w_contact = 1.0, 2.5, 0.35, 0.35 if anchors else 0.08
     total = (
         -w_clash * clash
         + w_rg * rg_term
@@ -217,8 +218,10 @@ def refine_tertiary(
     movable = _movable_indices(seq, frozen)
     restarts, steps, sigma = _budget(len(seq))
     if anchors:
-        steps = int(min(80, steps + 8 * len(list(anchors))))
-        sigma = max(sigma, 20.0)
+        n_anc = len(list(anchors))
+        restarts = max(restarts, 3)
+        steps = int(min(220, steps + 12 * n_anc))
+        sigma = max(sigma, 22.0)
     rng = np.random.default_rng(seed)
 
     if progress:

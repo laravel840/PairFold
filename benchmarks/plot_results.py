@@ -9,9 +9,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
-ROOT = Path(__file__).resolve().parent
-CSV_PATH = ROOT / "benchmark_results.csv"
-OUT_PATH = ROOT / "benchmark_plots.png"
+BENCH_DIR = Path(__file__).resolve().parent
+CSV_PATH = BENCH_DIR / "results" / "benchmark_results.csv"
+OUT_PATH = BENCH_DIR / "results" / "benchmark_plots.png"
 
 
 def main() -> None:

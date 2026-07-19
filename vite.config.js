@@ -17,6 +17,8 @@ export default defineConfig({
         "**/*.pdf",
         "**/*.jsonl",
         "**/benchmark_pdbs/**",
+        "**/benchmarks/pdbs/**",
+        "**/benchmarks/results/**",
         "**/node_modules/**",
       ],
     },

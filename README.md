@@ -10,49 +10,122 @@
 
 ### Fast Local Backbone Generation
 
-**PairFold** is a fast, near-linear **O(N)** local backbone generator that runs on consumer GPUs. It predicts residue-level backbone torsions (φ/ψ), assembles Cα traces, and can serve **massive sequence queries up to 50,000 residues** at the angle level — designed for rapid structural prototyping and interactive visualization, not global fold competition.
+**PairFold** is a fast, near-linear **O(N)** local backbone generator that runs on consumer GPUs. It predicts residue-level backbone torsions (φ/ψ), assembles Cα traces (optional all-atom for short chains), and can serve **massive sequence queries up to 50,000 residues** at the angle level — designed for rapid structural prototyping and interactive visualization, not global fold competition.
 
 <p align="center">
-  <img src="paper/benchmark_plots.png" alt="PairFold benchmark plots" width="720"/>
+  <img src="paper/benchmark_plots_expanded.png" alt="PairFold expanded benchmark plots" width="720"/>
 </p>
 
 ---
 
 ## Why PairFold?
 
-| | PairFold | Full tertiary folders (e.g. AlphaFold) |
+| | PairFold | Full tertiary folders (e.g. AlphaFold / ESMFold) |
 |---|---|---|
 | **Goal** | Fast local geometry + viz | Near-experimental global folds |
-| **Scaling** | Near-linear O(N) on consumer GPUs | Heavy MSA / Evoformer stacks |
+| **Scaling** | Near-linear O(N) on consumer GPUs | Heavy MSA / Evoformer / large LM stacks |
 | **Long queries** | Up to **50k** residues (angles / Cα-trace) | Typically much shorter practical limits |
-| **Typical Cα accuracy** | ~**16–17 Å** mean RMSD (local focus) | Often **1–3 Å** global |
+| **Memory** | **Low** (commodity GPU) | **High** VRAM |
+| **Typical Cα accuracy** | Domains100 mean **~26 Å** (interactive path); ablation full local stack **~13 Å** | Often **1–4 Å** global |
+
+---
+
+## Expanded Benchmarks (paper)
+
+Results from the expanded evaluation suite (`benchmarks/benchmark_expanded.py`, `benchmark_ablation.py`). Full tables and figures are in [`paper/PairFold.pdf`](paper/PairFold.pdf).
+
+### Domains100 — 103 diverse domains
+
+Interactive consensus + SS path (contact hinge / look-ahead off for panel scale).
+
+| Class | n | Mean Cα RMSD | Mean time |
+|---|---:|---:|---:|
+| all-α | 34 | 26.98 Å | 2.95 s |
+| all-β | 33 | 27.28 Å | 2.28 s |
+| α/β | 36 | 23.55 Å | 2.77 s |
+| **All** | **103** | **25.88 Å** | **2.67 s** |
+
+- Median RMSD: **24.73 Å**
+- Length–RMSD Pearson correlation: **r = 0.78**
+- CSV: [`benchmarks/results/benchmark_domains100.csv`](benchmarks/results/benchmark_domains100.csv)
+
+### Ablation — 20 representative domains
+
+| Configuration | Mean RMSD | Mean time |
+|---|---:|---:|
+| Base (consensus only) | 14.68 Å | 6.09 s |
+| + Look-ahead | 13.33 Å | 9.68 s |
+| + Lever polish | 14.01 Å | 11.93 s |
+| + SS freezing | 13.23 Å | 15.29 s |
+| **Full local stack** | **13.23 Å** | **15.29 s** |
+
+### Method comparison
+
+| Method | Mean time | Mean RMSD | Memory |
+|---|---|---|---|
+| **PairFold (Domains100)** | **2.67 s** | **25.9 Å** | Low |
+| Rosetta ab initio* | 10²–10⁴ s | ~5–12 Å | High |
+| ESMFold* | ~10–60 s | ~2–4 Å | High |
+
+\*Rosetta / ESMFold: literature / typical ranges (not re-run here).
+
+### Long100 — tiled 10k–50k sequences
+
+| Metric | Value |
+|---|---|
+| Cases | **100** |
+| Length range | **10,000 – 50,000** |
+| Mean wall-clock | **0.36 s** |
+| Mean per-tile Cα RMSD | **26.34 Å** |
+
+CSV: [`benchmarks/results/benchmark_long100.csv`](benchmarks/results/benchmark_long100.csv)
+
+<p align="center">
+  <img src="paper/benchmark_long100_time.png" alt="Long-chain timing" width="480"/>
+  &nbsp;
+  <img src="paper/benchmark_ablation_plot.png" alt="Ablation plot" width="400"/>
+</p>
+
+### Reproduce paper benches
+
+```bash
+# Domains100 + Long100 + plots/tables
+powershell -File benchmarks/run_paper_benches.ps1
+# or stepwise:
+python -u benchmarks/benchmark_expanded.py --domains-only
+python -u benchmarks/benchmark_ablation.py
+python -u benchmarks/benchmark_expanded.py --long-only --long-cases 100
+python -u benchmarks/plot_expanded.py
+python -u benchmarks/write_paper_tables.py
+```
+
+Overleaf-ready zip: [`paper/PairFold_overleaf.zip`](paper/PairFold_overleaf.zip).
 
 ---
 
 ## Key Features
 
-- **Calibrated confidence** — inference-time temperature sharpening with **T = 0.55** so high-consensus windows are not stuck near chance-level scores
-- **Dynamic-programming segmentation** — sequences are split into overlapping 2–5 residue PDB-trained windows; full DP for moderate lengths, fast tiling for very long chains
-- **Secondary-structure freezing** — helix/strand blocks are detected and stabilized during assembly (enabled for **N ≤ 256**)
-- **Clash-aware backtracking** — look-ahead steric search and lever-effect correction for short/medium chains (**N ≤ 256**)
-- **Optional contact anchors** — lightweight ContactPairNet pulls local geometry toward predicted Cα contacts on shorter targets
-- **Web + API** — FastAPI inference server and a Vite/Three.js UI with interactive 3D Cα viewing (φ/ψ on hover)
+- **Calibrated confidence** — inference-time temperature sharpening with **T = 0.55**
+- **Dynamic-programming segmentation** — overlapping 2–5 residue PDB-trained windows; fast tiling for very long chains
+- **Secondary-structure freezing** — helix/strand blocks for **N ≤ 256**
+- **Clash-aware look-ahead** — steric search and lever-effect correction (**N ≤ 256**, node-capped)
+- **Contact steering (optional)** — ESM-2 / ContactPairNet anchors + early hinge fold on short domains
+- **Stage-2/3 all-atom** — sidechain / atom export for short sequences (viewer + export)
+- **Web + API** — FastAPI server and Vite/Three.js UI with interactive 3D (inline all-atom when available)
 
 ---
 
-## Honest Disclaimer & Benchmarks
+## Honest Disclaimer
 
-> **PairFold is not a tertiary folding competitor to AlphaFold.**
+> **PairFold is not a tertiary folding competitor to AlphaFold or ESMFold.**
 
-It optimizes for **speed and local backbone geometry** (short PDB fragments + optional sparse contacts). On internal short-domain benchmarks, mean Kabsch Cα RMSD is typically around **16–17 Å** — useful for structural prototyping, teaching, and visualization, but **far from** AlphaFold-class **1–3 Å** global accuracy.
+It optimizes for **speed and local backbone geometry**. Domains100 interactive-path mean RMSD (**~26 Å**) and ablation full-stack (**~13 Å** on 20 short domains) remain **far from** AlphaFold-class **1–3 Å** accuracy. Use it for prototyping, teaching, and long-sequence visualization — not as a drop-in folding oracle.
 
 | What it is good for | What it is not |
 |---|---|
 | Fast local φ/ψ / Cα prototypes | Atomic-accuracy global folds |
 | Long-sequence angle-level scans (≤50k) | MSA-driven evolutionary modeling |
 | Interactive 3D inspection in the browser | Drop-in AlphaFold / ESMFold replacement |
-
-Published write-up and figures live under [`paper/`](paper/) (`main.tex`, `benchmark_plots.png`).
 
 ---
 
@@ -96,8 +169,6 @@ pairfold-server
 
 The server listens on **http://127.0.0.1:8000** (CORS enabled for the local UI).
 
-Equivalent module form:
-
 ```bash
 python -m pairfold.server
 ```
@@ -111,14 +182,12 @@ python -m pairfold.predict AGPVKLLTFGAA
 
 ### 3. Open the web UI (optional)
 
-In a second terminal:
-
 ```bash
 npm install
 npm run dev
 ```
 
-Then open **http://127.0.0.1:5173/** — Vite proxies `/api` → `:8000`. Paste a sequence (or drop a FASTA/text file) and use **Predict (PDB)**.
+Then open **http://127.0.0.1:5173/** — Vite proxies `/api` → `:8000`. Paste a sequence (or drop a FASTA/text file) and use **Predict**.
 
 ---
 
@@ -126,26 +195,23 @@ Then open **http://127.0.0.1:5173/** — Vite proxies `/api` → `:8000`. Paste 
 
 ```text
 PairFold/
-├── pairfold/              # Core Python package
-│   ├── predict.py         # Inference + segmentation assembly
-│   ├── server.py          # FastAPI + pairfold-server entry
-│   ├── clash_assembly.py  # Clash / SS / lever geometry
-│   ├── structure_blocks.py
-│   ├── model/             # FragmentTorsionNet + ContactPairNet
-│   ├── data/              # PDB fetch / fragment / contact pipelines
-│   └── checkpoints/       # Trained weights
-├── paper/                 # Manuscript + benchmark figures
+├── pairfold/              # Core Python package (ML + inference)
+├── benchmarks/            # Expanded benches, ablation, plots
+│   ├── sets/domains_100.json
+│   ├── results/           # Domains100 / Long100 / ablation CSVs
+│   └── run_paper_benches.ps1
+├── paper/                 # Manuscript, PDF, Overleaf zip, figures
 ├── src/                   # Vite frontend (Three.js viewer)
-├── benchmark.py           # Short-domain Cα RMSD benchmark
+├── examples/              # Sample sequences
 ├── requirements.txt
-└── setup.py
+├── setup.py
+├── package.json
+└── README.md
 ```
 
 ---
 
 ## Training Pipeline (optional)
-
-From the repository root, with a GPU:
 
 ```bash
 python -m pairfold.data.fetch_pdb
@@ -155,8 +221,6 @@ python -m pairfold.train
 python -m pairfold.train_contact
 pairfold-server
 ```
-
-Or: `npm run ml:pipeline` then `npm run ml:server`.
 
 ---
 
@@ -168,12 +232,15 @@ Or: `npm run ml:pipeline` then `npm run ml:server`.
 | SS freeze + clash backtracking | ≤ 256 | Heavy steric / SS pipeline |
 | Full DP segmentation | ≤ 2,048 | Above this → fast tile assemble |
 | Contact head | ≤ 1,000 | Skipped on very long chains (RAM) |
+| Stage-2/3 all-atom | ≤ 256 | Sidechains / atoms |
 
 ---
 
 ## Citation / Paper
 
-See [`paper/main.tex`](paper/main.tex) and [`paper/PairFold.pdf`](paper/PairFold.pdf) for the technical description of the method and benchmarks.
+- PDF: [`paper/PairFold.pdf`](paper/PairFold.pdf)
+- LaTeX / Overleaf: [`paper/main.tex`](paper/main.tex), [`paper/PairFold_overleaf.zip`](paper/PairFold_overleaf.zip)
+- Expanded figures: `paper/benchmark_plots_expanded.png`, `benchmark_ablation_plot.png`, `benchmark_long100_time.png`
 
 ---
 
@@ -187,5 +254,3 @@ MIT (unless otherwise noted in individual assets or checkpoints).
   <b>PairFold</b> — fast local backbones on your GPU.<br/>
   <sub>Prototype locally. Inspect interactively. Don’t confuse local geometry with AlphaFold-level folds.</sub>
 </p>
-# PairFold
-

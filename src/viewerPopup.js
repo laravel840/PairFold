@@ -35,15 +35,26 @@ function boot() {
   }
 
   const n = payload.phis?.length || payload.sequence?.length || 0;
+  const nAtoms = payload.structure?.atoms?.length || 0;
   if (title) {
-    title.textContent = n ? `PairFold 3D · ${n} residues` : "PairFold 3D";
+    title.textContent = n
+      ? nAtoms > 0
+        ? `PairFold 3D · ${n} residues · ${nAtoms} atoms`
+        : `PairFold 3D · ${n} residues`
+      : "PairFold 3D";
   }
 
   // Ensure layout has a real size before WebGL init
   requestAnimationFrame(() => {
     try {
-      destroyPeptide3D();
-      mountPeptide3D(host, payload);
+      destroyPeptide3D(host);
+      // Prefer client all-atom so Stage-2/3 shows even if API omitted sidechains
+      const n = payload.phis?.length || 0;
+      const viewInput =
+        n > 0 && n <= 256
+          ? { ...payload, structure: null, caTrace: false }
+          : payload;
+      mountPeptide3D(host, viewInput);
       if (!host.querySelector("canvas")) {
         host.innerHTML =
           '<p class="empty">3D canvas failed to start. Try closing and opening again.</p>';

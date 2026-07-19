@@ -201,6 +201,27 @@ body {
   border-color: var(--accent-hover);
 }
 
+.detail__stage--launch.detail__stage--inline3d {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  place-items: stretch;
+  gap: 0.65rem;
+  min-height: 24rem;
+  padding: 0.75rem;
+}
+
+.detail__stage--inline3d .viewer3d {
+  flex: 1;
+  min-height: 20rem;
+  width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #241e18;
+  position: relative;
+}
+
 .detail__stage--launch .viewer3d__hint {
   margin: 0;
   text-align: center;
@@ -223,6 +244,22 @@ body {
   position: absolute !important;
   inset: 0;
   pointer-events: auto;
+}
+
+.viewer-badge {
+  position: absolute;
+  left: 0.75rem;
+  top: 0.75rem;
+  z-index: 4;
+  padding: 0.3rem 0.55rem;
+  border-radius: 4px;
+  background: rgba(26, 22, 18, 0.88);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  pointer-events: none;
 }
 
 .viewer-tip {

@@ -1,0 +1,34 @@
+phase,note,mean_rmsd,mean_time_s,1A8O,1CRN,2GB1,1UBQ,3GB1,date
+A_baseline,published_benchmark_results.csv,17.172,12.99,13.123,16.044,18.014,19.300,19.379,2026-07-18
+B_C_esm_early,esm2_t6 + early_contact_fold,13.850,96.54,8.878,7.956,20.016,13.038,19.363,2026-07-18
+B_C_esm_early,esm2_t6 + early_contact_fold,14.119,43.66,7.275,10.440,17.582,17.658,17.639,2026-07-18
+B_C_esm_early,esm2_t6 + early_contact_fold,12.016,41.15,7.352,10.924,15.058,11.310,15.437,2026-07-18
+B_C_esm_early,esm2_t6 + early_contact_fold,12.016,41.98,7.352,10.924,15.058,11.310,15.437,2026-07-18
+B_C_esm_early,esm2_t6 + early_contact_fold,12.016,37.64,7.352,10.924,15.058,11.310,15.437,2026-07-18
+E_iterate,esm2_t12_35M_UR50D+ca_fold+early_torsion,12.461,62.24,9.073,10.924,14.952,12.976,14.379,2026-07-18
+E_iterate,esm2_t12_35M_UR50D+ca_fold+early_torsion,11.720,60.90,7.352,10.924,14.587,11.310,14.427,2026-07-18
+E_iterate,esm2_t12_35M_UR50D+ca_fold+early_torsion,14.654,80.78,11.097,14.478,14.112,20.159,13.423,2026-07-18
+E_iterate,esm2_t12_35M_UR50D+ca_fold+early_torsion,11.471,54.14,7.352,15.438,10.986,12.947,10.631,2026-07-18
+E_iterate,esm2_t12_35M_UR50D+ca_fold+early_torsion,11.250,50.56,7.352,14.334,10.986,12.947,10.631,2026-07-18
+B_C_esm_early,esm2_t6 + early_contact_fold,14.141,2148.13,10.440,8.292,15.650,18.798,17.524,2026-07-18
+E_iterate,esm2_t12_35M_UR50D+ca_fold+early_torsion,11.471,51.05,7.352,15.438,10.986,12.947,10.631,2026-07-18
+E_iterate,esm2_t12_35M_UR50D+ca_fold+early_torsion,11.250,45.88,7.352,14.334,10.986,12.947,10.631,2026-07-18
+E_iterate,esm2_t30_150M_UR50D+ca_fold+early_torsion,14.890,46.59,19.843,14.334,13.003,14.286,12.985,2026-07-18
+E_iterate,esm2_t12_35M_UR50D+ca_fold+early_torsion,17.999,40.38,7.352,14.334,21.014,28.420,18.873,2026-07-18
+E_iterate,esm2_t12_35M_UR50D+ca_fold+early_torsion,11.250,48.61,7.352,14.334,10.986,12.947,10.631,2026-07-18
+E2_scaffold_ens,esm2_t12_35M_UR50D+dg_ensemble,12.763,107.56,7.030,14.334,15.320,12.947,14.186,2026-07-18
+E2_scaffold_ens,esm2_t12_35M_UR50D+dg_ensemble,14.468,423.29,17.398,14.334,15.573,9.796,15.241,2026-07-18
+E2_scaffold_ens,esm2_t12_35M_UR50D+dg_ensemble,14.034,150.92,21.271,14.334,10.986,12.947,10.631,2026-07-18
+E2_scaffold_ens,esm2_t12_35M_UR50D+dg_ensemble,14.034,175.52,21.271,14.334,10.986,12.947,10.631,2026-07-18
+E2_scaffold_ens,esm2_t12_35M_UR50D+dg_ensemble,11.832,125.38,10.263,14.334,10.986,12.947,10.631,2026-07-18
+E2_scaffold_ens,esm2_t12_35M_UR50D+dg_ensemble,11.250,75.97,7.352,14.334,10.986,12.947,10.631,2026-07-18
+E2_plateau,restored_best_stable_after_mds_attempts,11.250,76.00,7.352,14.334,10.986,12.947,10.631,2026-07-18
+E3_soft_map,esm2_t12_35M_UR50D+soft_contact_fold,14.790,94.43,11.359,14.334,17.600,12.947,17.712,2026-07-19
+E3_soft_map,esm2_t12_35M_UR50D+soft_contact_fold,14.790,97.49,11.359,14.334,17.600,12.947,17.712,2026-07-19
+E3_soft_map,esm2_t12_35M_UR50D+soft_contact_fold,11.250,82.25,7.352,14.334,10.986,12.947,10.631,2026-07-19
+E3_soft_map,esm2_t12_35M_UR50D+soft_contact_fold,13.125,126.45,7.352,14.334,14.892,14.455,14.589,2026-07-19
+E3_soft_map,esm2_t12_35M_UR50D+soft_contact_fold,11.126,114.43,7.352,13.711,10.986,12.947,10.631,2026-07-19
+E3_soft_map,esm2_t12_35M_UR50D+soft_contact_fold,11.933,182.30,7.352,17.748,10.986,12.947,10.631,2026-07-19
+E3_soft_map,esm2_t12_35M_UR50D+soft_contact_fold,11.226,163.68,7.853,13.711,10.986,12.947,10.631,2026-07-19
+E3_soft_map,esm2_t12_35M_UR50D+soft_contact_fold,12.788,214.31,7.352,13.711,15.405,12.947,14.523,2026-07-19
+E3_soft_map,esm2_t12_35M_UR50D+soft_contact_fold,11.126,114.99,7.352,13.711,10.986,12.947,10.631,2026-07-19

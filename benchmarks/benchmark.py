@@ -6,8 +6,8 @@ Uses the project's FragmentPredictor.predict_sequence() to predict backbone
 torsions, builds Cα coordinates via clash_assembly.dihedrals_to_ca(), then
 reports Kabsch-aligned Cα RMSD vs experimental structures from the RCSB PDB.
 
-Run from anywhere:
-  python benchmark.py
+Run from repo root:
+  python benchmarks/benchmark.py
 """
 
 from __future__ import annotations
@@ -21,9 +21,10 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+BENCH_DIR = Path(__file__).resolve().parent
+REPO_ROOT = BENCH_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from Bio.Data.IUPACData import protein_letters_3to1  # noqa: E402
 from Bio.PDB import PDBList, PDBParser, PPBuilder  # noqa: E402
@@ -37,8 +38,8 @@ warnings.filterwarnings("ignore", category=PDBConstructionWarning)
 # Standard diverse small domains (all within PairFold tertiary / export limits)
 PDB_IDS = ["1A8O", "1CRN", "2GB1", "1UBQ", "3GB1"]
 
-OUT_CSV = ROOT / "benchmark_results.csv"
-CACHE_DIR = ROOT / "benchmark_pdbs"
+OUT_CSV = BENCH_DIR / "results" / "benchmark_results.csv"
+CACHE_DIR = BENCH_DIR / "pdbs"
 
 
 def three_to_one(resname: str) -> Optional[str]:
