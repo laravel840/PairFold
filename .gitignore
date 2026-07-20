@@ -42,6 +42,9 @@ pairfold/data/fold_crops/
 pairfold/export/
 benchmarks/pdbs/
 
+# Manuscript kept local (not published with the repo)
+paper/
+
 # Large / regenerable local artifacts
 *.pt.bak
 .debug/

@@ -1,6 +1,0 @@
-﻿variant,pdb_id,class,length,time_s,rmsd
-base_consensus,MEAN,all,0,6.09,14.678
-plus_lookahead,MEAN,all,0,9.68,13.326
-plus_lever,MEAN,all,0,11.93,14.007
-plus_ss,MEAN,all,0,15.29,13.231
-full_pipeline,MEAN,all,0,15.29,13.231

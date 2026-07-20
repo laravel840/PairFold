@@ -1,19 +1,11 @@
 # PairFold
 
-<p align="center">
-  <a href="./paper/PairFold.pdf">
-    <img src="https://img.shields.io/badge/Download_Full_Research_Paper-PDF-b91c1c?style=for-the-badge&labelColor=1f2937" alt="Download the Full Research Paper (PDF)"/>
-  </a>
-  <br/>
-  <strong><a href="./paper/PairFold.pdf">Download the Full Research Paper (PDF)</a></strong>
-</p>
-
 ### Fast Local Backbone Generation
 
 **PairFold** is a fast, near-linear **O(N)** local backbone generator that runs on consumer GPUs. It predicts residue-level backbone torsions (φ/ψ), assembles Cα traces (optional all-atom for short chains), and can serve **massive sequence queries up to 50,000 residues** at the angle level — designed for rapid structural prototyping and interactive visualization, not global fold competition.
 
 <p align="center">
-  <img src="paper/benchmark_plots_expanded.png" alt="PairFold expanded benchmark plots" width="720"/>
+  <img src="benchmarks/results/benchmark_plots_expanded.png" alt="PairFold expanded benchmark plots" width="720"/>
 </p>
 
 ---
@@ -30,9 +22,9 @@
 
 ---
 
-## Expanded Benchmarks (paper)
+## Expanded Benchmarks
 
-Results from the expanded evaluation suite (`benchmarks/benchmark_expanded.py`, `benchmark_ablation.py`). Full tables and figures are in [`paper/PairFold.pdf`](paper/PairFold.pdf).
+Results from the expanded evaluation suite (`benchmarks/benchmark_expanded.py`, `benchmark_ablation.py`). CSVs and plots live under [`benchmarks/results/`](benchmarks/results/).
 
 ### Domains100 — 103 diverse domains
 
@@ -81,12 +73,12 @@ Interactive consensus + SS path (contact hinge / look-ahead off for panel scale)
 CSV: [`benchmarks/results/benchmark_long100.csv`](benchmarks/results/benchmark_long100.csv)
 
 <p align="center">
-  <img src="paper/benchmark_long100_time.png" alt="Long-chain timing" width="480"/>
+  <img src="benchmarks/results/benchmark_long100_time.png" alt="Long-chain timing" width="480"/>
   &nbsp;
-  <img src="paper/benchmark_ablation_plot.png" alt="Ablation plot" width="400"/>
+  <img src="benchmarks/results/benchmark_ablation_plot.png" alt="Ablation plot" width="400"/>
 </p>
 
-### Reproduce paper benches
+### Reproduce expanded benches
 
 ```bash
 # Domains100 + Long100 + plots/tables
@@ -98,8 +90,6 @@ python -u benchmarks/benchmark_expanded.py --long-only --long-cases 100
 python -u benchmarks/plot_expanded.py
 python -u benchmarks/write_paper_tables.py
 ```
-
-Overleaf-ready zip: [`paper/PairFold_overleaf.zip`](paper/PairFold_overleaf.zip).
 
 ---
 
@@ -200,7 +190,6 @@ PairFold/
 │   ├── sets/domains_100.json
 │   ├── results/           # Domains100 / Long100 / ablation CSVs
 │   └── run_paper_benches.ps1
-├── paper/                 # Manuscript, PDF, Overleaf zip, figures
 ├── src/                   # Vite frontend (Three.js viewer)
 ├── examples/              # Sample sequences
 ├── requirements.txt
@@ -233,14 +222,6 @@ pairfold-server
 | Full DP segmentation | ≤ 2,048 | Above this → fast tile assemble |
 | Contact head | ≤ 1,000 | Skipped on very long chains (RAM) |
 | Stage-2/3 all-atom | ≤ 256 | Sidechains / atoms |
-
----
-
-## Citation / Paper
-
-- PDF: [`paper/PairFold.pdf`](paper/PairFold.pdf)
-- LaTeX / Overleaf: [`paper/main.tex`](paper/main.tex), [`paper/PairFold_overleaf.zip`](paper/PairFold_overleaf.zip)
-- Expanded figures: `paper/benchmark_plots_expanded.png`, `benchmark_ablation_plot.png`, `benchmark_long100_time.png`
 
 ---
 
