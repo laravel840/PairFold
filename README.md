@@ -101,6 +101,7 @@ python -u benchmarks/write_paper_tables.py
 - **Clash-aware look-ahead** — steric search and lever-effect correction (**N ≤ 256**, node-capped)
 - **Contact steering (optional)** — ESM-2 / ContactPairNet anchors + early hinge fold on short domains
 - **Stage-2/3 all-atom** — sidechain / atom export for short sequences (viewer + export)
+- **UniProtKB import** — search by protein name, gene, Entry Name, or accession; browse natural variants vs mutagenesis and load wild-type or mutant sequences
 - **Web + API** — FastAPI server and Vite/Three.js UI with interactive 3D (inline all-atom when available)
 
 ---
@@ -170,14 +171,29 @@ python -m pairfold.predict AGPVK
 python -m pairfold.predict AGPVKLLTFGAA
 ```
 
-### 3. Open the web UI (optional)
+### 3. Open the web UI
+
+**Do not open `index.html` from disk** (`file://`) — browsers block the app scripts that way.
+
+**One click:** double-click **`Web/Open PairFold.vbs`** (or `Web/PairFold.cmd`). It starts the server if needed and opens **http://127.0.0.1:8000/**.
+
+Manual:
 
 ```bash
-npm install
+npm run build
+python -m pairfold.server
+```
+
+For frontend hot-reload during UI work:
+
+```bash
+# terminal A
+python -m pairfold.server --no-browser
+# terminal B
 npm run dev
 ```
 
-Then open **http://127.0.0.1:5173/** — Vite proxies `/api` → `:8000`. Paste a sequence (or drop a FASTA/text file) and use **Predict**.
+Then open **http://127.0.0.1:5173/** (Vite proxies `/predict` → `:8000`).
 
 ---
 
@@ -185,12 +201,16 @@ Then open **http://127.0.0.1:5173/** — Vite proxies `/api` → `:8000`. Paste 
 
 ```text
 PairFold/
+├── Web/                   # One-click web launcher
+│   ├── Open PairFold.vbs  # Double-click → start server + open browser
+│   └── PairFold.cmd       # Same launcher (calls the .vbs)
 ├── pairfold/              # Core Python package (ML + inference)
 ├── benchmarks/            # Expanded benches, ablation, plots
 │   ├── sets/domains_100.json
 │   ├── results/           # Domains100 / Long100 / ablation CSVs
 │   └── run_paper_benches.ps1
-├── src/                   # Vite frontend (Three.js viewer)
+├── src/                   # Vite frontend source (Three.js viewer)
+├── dist/                  # Built HTML app (npm run build)
 ├── examples/              # Sample sequences
 ├── requirements.txt
 ├── setup.py

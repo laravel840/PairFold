@@ -109,6 +109,15 @@ def fold_ca_gradient(
     return best, float(e0), float(best_e)
 
 
+def _kabsch_R(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    P = a - a.mean(axis=0)
+    Q = b - b.mean(axis=0)
+    H = P.T @ Q
+    U, _S, Vt = np.linalg.svd(H)
+    d = np.linalg.det(Vt.T @ U.T)
+    return Vt.T @ np.diag([1.0, 1.0, np.sign(d)]) @ U.T
+
+
 def fit_torsions_to_ca(
     target_ca: np.ndarray,
     phis_deg: Sequence[float],
@@ -121,22 +130,27 @@ def fit_torsions_to_ca(
     tgt = np.asarray(target_ca, dtype=np.float64)
     n = len(ph)
     rng = np.random.default_rng(seed)
+    Qc = tgt - tgt.mean(axis=0)
 
-    def loss(p_h, p_s) -> float:
+    def loss_with_R(p_h, p_s, R: np.ndarray) -> float:
         ca = dihedrals_to_ca(p_h, p_s)
         Pc = ca - ca.mean(axis=0)
-        Qc = tgt - tgt.mean(axis=0)
-        H = Pc.T @ Qc
-        U, _S, Vt = np.linalg.svd(H)
-        d = np.linalg.det(Vt.T @ U.T)
-        R = Vt.T @ np.diag([1.0, 1.0, np.sign(d)]) @ U.T
         return float(np.mean(np.sum((Pc @ R - Qc) ** 2, axis=1)))
 
+    # Recompute Kabsch only periodically — SVD every Metropolis step was O(minutes)
+    # for ~100 aa chains and froze the UI at the early-contact stage.
+    align_every = max(20, n_steps // 40)
+    R = _kabsch_R(dihedrals_to_ca(ph, ps), tgt)
     best_ph, best_ps = ph.copy(), ps.copy()
-    best_e = loss(ph, ps)
+    best_e = loss_with_R(ph, ps, R)
     cur_ph, cur_ps, cur_e = best_ph.copy(), best_ps.copy(), best_e
 
     for step in range(n_steps):
+        if step % align_every == 0 and step > 0:
+            R = _kabsch_R(dihedrals_to_ca(cur_ph, cur_ps), tgt)
+            cur_e = loss_with_R(cur_ph, cur_ps, R)
+            if cur_e < best_e:
+                best_e, best_ph, best_ps = cur_e, cur_ph.copy(), cur_ps.copy()
         frac = step / max(n_steps - 1, 1)
         amp = 25.0 * (1.0 - 0.88 * frac) + 1.0
         temp = 1.2 * (1.0 - frac) ** 2 + 0.02
@@ -152,12 +166,15 @@ def fit_torsions_to_ca(
             j = int(np.clip(i + rng.choice([-1, 1]), 0, n - 1))
             d2 = float(rng.uniform(-amp * 0.4, amp * 0.4))
             trial_ph[j] = ((trial_ph[j] + d2 + 180.0) % 360.0) - 180.0
-        e = loss(trial_ph, trial_ps)
+        e = loss_with_R(trial_ph, trial_ps, R)
         if e <= cur_e or rng.random() < np.exp(-(e - cur_e) / max(temp, 1e-6)):
             cur_ph, cur_ps, cur_e = trial_ph, trial_ps, e
             if cur_e < best_e:
                 best_ph, best_ps, best_e = cur_ph.copy(), cur_ps.copy(), cur_e
 
+    # Final aligned score for the returned RMSD
+    R = _kabsch_R(dihedrals_to_ca(best_ph, best_ps), tgt)
+    best_e = loss_with_R(best_ph, best_ps, R)
     return best_ph, best_ps, float(np.sqrt(best_e))
 
 

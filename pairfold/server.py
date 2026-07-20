@@ -1,19 +1,30 @@
-"""FastAPI inference server for PDB-trained fragment model."""
+"""FastAPI inference server for PDB-trained fragment model.
+
+Also serves the built web UI from ``dist/`` (run ``npm run build`` first).
+Open http://127.0.0.1:8000/ — do not open index.html via file://.
+"""
 
 from __future__ import annotations
 
 import json
 import threading
+import time
+import webbrowser
+from pathlib import Path
 from queue import Empty, Queue
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import MAX_QUERY_LEN, TERTIARY_MAX_LEN, VIEW_3D_MAX_LEN
 from .predict import FragmentPredictor
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DIST_DIR = REPO_ROOT / "dist"
 
 app = FastAPI(
     title="PairFold PDB Fragment Predictor",
@@ -130,13 +141,32 @@ def predict_stream(req: PredictRequest):
     threading.Thread(target=worker, daemon=True).start()
 
     def event_stream():
+        # Heartbeats keep the browser stall-watchdog alive during heavy phases
+        # (early contact fold / clash assembly) that may not emit for >25s.
+        last_progress = {
+            "pct": 1.0,
+            "message": "Starting…",
+            "elapsed_s": None,
+            "eta_s": None,
+            "n": len(req.sequence or ""),
+        }
+        deadline = time.time() + 14400
         while True:
+            remaining = max(0.1, deadline - time.time())
             try:
-                kind, payload = q.get(timeout=14400)
+                kind, payload = q.get(timeout=min(5.0, remaining))
             except Empty:
-                yield json.dumps({"type": "error", "detail": "Prediction timed out"}) + "\n"
-                break
+                if time.time() >= deadline:
+                    yield json.dumps({"type": "error", "detail": "Prediction timed out"}) + "\n"
+                    break
+                hb = dict(last_progress)
+                hb["heartbeat"] = True
+                if hb.get("message") and "(working…)" not in str(hb["message"]):
+                    hb["message"] = f"{hb['message']} (working…)"
+                yield json.dumps({"type": "progress", **hb}) + "\n"
+                continue
             if kind == "progress":
+                last_progress = {k: v for k, v in payload.items()}
                 yield json.dumps({"type": "progress", **payload}) + "\n"
             elif kind == "done":
                 n = len(payload.get("sequence") or "")
@@ -160,10 +190,65 @@ def predict_stream(req: PredictRequest):
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
+def _mount_ui() -> None:
+    """Serve the Vite-built HTML app from dist/ (same origin as the API)."""
+    index_html = DIST_DIR / "index.html"
+    if not index_html.is_file():
+        @app.get("/")
+        def ui_missing():
+            return {
+                "ok": True,
+                "api": "PairFold",
+                "ui": "missing",
+                "hint": "Run npm run build (or double-click Web/Open PairFold.vbs) then reopen http://127.0.0.1:8000/",
+            }
+
+        return
+
+    assets = DIST_DIR / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
+
+    @app.get("/")
+    def ui_index():
+        # Avoid stale UI after npm run build while the server stays up
+        return FileResponse(
+            index_html,
+            headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
+
+    viewer = DIST_DIR / "viewer.html"
+    if viewer.is_file():
+
+        @app.get("/viewer.html")
+        def ui_viewer():
+            return FileResponse(
+                viewer,
+                headers={"Cache-Control": "no-cache, must-revalidate"},
+            )
+
+
+_mount_ui()
+
+
 def main() -> None:
+    import argparse
+
     import uvicorn
 
-    uvicorn.run("pairfold.server:app", host="127.0.0.1", port=8000, reload=False)
+    parser = argparse.ArgumentParser(description="PairFold API + HTML app")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the HTML app in a browser",
+    )
+    args = parser.parse_args()
+    url = f"http://{args.host}:{args.port}/"
+    if not args.no_browser:
+        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+    uvicorn.run("pairfold.server:app", host=args.host, port=args.port, reload=False)
 
 
 if __name__ == "__main__":

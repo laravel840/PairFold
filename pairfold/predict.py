@@ -445,6 +445,7 @@ class FragmentPredictor:
         anchors: Optional[List[Tuple[int, int, float]]],
         contact_info: Optional[Dict] = None,
         contact_probs: Optional[np.ndarray] = None,
+        progress: Optional[Callable[[float, str], None]] = None,
     ) -> Tuple[List[float], List[float], str, bool]:
         """
         Stage-1 scaffold steering: sparse-anchor refine.
@@ -460,8 +461,13 @@ class FragmentPredictor:
             from .soft_contact_fold import rank_decoy
             from .tertiary import score_tertiary
 
+            def tick(frac: float, msg: str) -> None:
+                if progress:
+                    progress(float(frac), msg)
+
             note_parts: List[str] = []
             cur_ph, cur_ps = list(phis), list(psis)
+            n = len(sequence)
 
             mean_sc = float(contact_info.get("mean_score") or 0.0) if contact_info else 0.0
             sharp = (
@@ -484,7 +490,23 @@ class FragmentPredictor:
             from .contact_ca_fold import ca_contact_scaffold
             from .contact_fold import early_contact_fold
 
+            # Length-scaled budget — full sharp path was ~2.5 min silent at n≈110
+            # and tripped the UI 25s stall watchdog.
+            if n <= 48:
+                ca_steps, fit_steps = 500, 700
+                restarts, steps = EARLY_CONTACT_RESTARTS, EARLY_CONTACT_STEPS
+                seeds = [3, 17] if sharp else [3]
+            elif n <= 96:
+                ca_steps, fit_steps = 280, 360
+                restarts, steps = 2, max(100, EARLY_CONTACT_STEPS // 2)
+                seeds = [3]
+            else:
+                ca_steps, fit_steps = 180, 240
+                restarts, steps = 2, max(80, EARLY_CONTACT_STEPS // 3)
+                seeds = [3]
+
             base_ph, base_ps = list(cur_ph), list(cur_ps)
+            tick(0.02, "Early contact fold — ranking base")
             # Prefer soft-aware ranking when probs available
             if contact_probs is not None:
                 base_score = rank_decoy(sequence, base_ph, base_ps, contact_probs)
@@ -504,21 +526,22 @@ class FragmentPredictor:
                 except Exception:
                     fh_select = None
 
-            # Keep proven settings for sharp maps (aggressive boost/top-k regressed)
-            seeds = [3, 17] if sharp else [3]
             best_ph, best_ps = list(base_ph), list(base_ps)
             best_score = base_score
-            for seed in seeds:
+            for si, seed in enumerate(seeds):
+                frac0 = 0.05 + 0.90 * (si / max(len(seeds), 1))
+                frac1 = 0.05 + 0.90 * ((si + 1) / max(len(seeds), 1))
                 cand_ph, cand_ps = list(base_ph), list(base_ps)
                 if mean_sc >= 0.70 and len(anchors) >= 3:
+                    tick(frac0, f"Early contact Cα scaffold (seed {seed})")
                     ca_fold = ca_contact_scaffold(
                         sequence,
                         cand_ph,
                         cand_ps,
                         anchors,
                         scores=scores,
-                        ca_steps=900,
-                        fit_steps=1800,
+                        ca_steps=ca_steps,
+                        fit_steps=fit_steps,
                         seed=seed,
                         contact_boost=2.0,
                     )
@@ -526,14 +549,15 @@ class FragmentPredictor:
                         cand_ph = [float(x) for x in ca_fold["phis_deg"]]
                         cand_ps = [float(x) for x in ca_fold["psis_deg"]]
                         note_parts.append(f" CA-fold@{seed} ok.")
+                tick(0.5 * (frac0 + frac1), f"Early contact torsion anneal (seed {seed})")
                 folded = early_contact_fold(
                     sequence,
                     cand_ph,
                     cand_ps,
                     anchors,
                     scores=scores,
-                    n_restarts=EARLY_CONTACT_RESTARTS,
-                    steps_per_restart=EARLY_CONTACT_STEPS,
+                    n_restarts=restarts,
+                    steps_per_restart=steps,
                     seed=7 if not sharp else seed + 7,
                 )
                 e0 = float(folded["anchor_energy_before"])
@@ -557,6 +581,7 @@ class FragmentPredictor:
                     best_score = sc
                     best_ph, best_ps = cand_ph, cand_ps
                     note_parts.append(f" seed{seed} kept({sc:.2f}).")
+                tick(frac1, f"Early contact seed {seed} done")
 
             if best_score > base_score + 0.08:
                 note_parts.append(
@@ -568,7 +593,13 @@ class FragmentPredictor:
             )
             return base_ph, base_ps, "".join(note_parts), True
         except Exception as e:
-            return phis, psis, f" Early-contact-fold skipped ({type(e).__name__}).", bool(anchors)
+            err = str(e).encode("ascii", "replace").decode("ascii")
+            return (
+                phis,
+                psis,
+                f" Early-contact-fold skipped ({type(e).__name__}: {err}).",
+                bool(anchors),
+            )
 
     def _prior_boost(self, seq: str) -> float:
         c = self.seq_prior.get(seq, 0)
@@ -842,6 +873,7 @@ class FragmentPredictor:
                     anchors,
                     contact_info,
                     contact_probs=contact_probs,
+                    progress=lambda t, m: report(0.76 + 0.04 * t, m),
                 )
                 if not keep_anc:
                     anchors = None
@@ -929,6 +961,7 @@ class FragmentPredictor:
                 anchors,
                 contact_info,
                 contact_probs=contact_probs,
+                progress=lambda t, m: report(0.55 + 0.20 * t, m),
             )
             if not keep_anc:
                 anchors = None
@@ -1089,6 +1122,7 @@ class FragmentPredictor:
                 anchors,
                 contact_info,
                 contact_probs=contact_probs,
+                progress=lambda t, m: report(0.74 + 0.02 * t, m),
             )
             if not keep_anc:
                 anchors = None
@@ -1145,13 +1179,23 @@ class FragmentPredictor:
                     )
                     return hyps
 
+                # Bound search so medium chains (e.g. insulin ~110 aa) cannot
+                # burn minutes in DFS after early-contact fold.
+                n_aa = len(seq)
+                if n_aa <= 64:
+                    la, max_nodes = 4, 2500
+                elif n_aa <= 128:
+                    la, max_nodes = 3, 800
+                else:
+                    la, max_nodes = 2, 400
+                report(0.765, f"Clash assembly (lookahead={la}, nodes≤{max_nodes})")
                 slots = make_pentamer_slots(seq, hyp_fn, frag_len=5)
                 asm = assemble_greedy_backtrack(
                     seq,
                     slots,
-                    lookahead=4,
+                    lookahead=la,
                     relax_on_clash=True,
-                    max_nodes=3_000,
+                    max_nodes=max_nodes,
                     anchors=anchors,
                 )
                 phis = [float(x) for x in asm.phis_deg]

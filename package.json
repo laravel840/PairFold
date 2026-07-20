@@ -7,8 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "app": "npm run build && python -m pairfold.server",
     "ml:pipeline": "python -m pairfold.run_pipeline",
-    "ml:server": "python -m pairfold.server"
+    "ml:server": "python -m pairfold.server --no-browser"
   },
 
   "devDependencies": {

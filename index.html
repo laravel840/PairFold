@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PairFold — Dipeptide Conformations</title>
+    <title>PairFold — Local Backbone App</title>
     <style>
       html,
       body {
@@ -33,6 +33,36 @@
         font-family: Consolas, monospace;
         font-size: 0.85rem;
       }
+      .file-open {
+        max-width: 34rem;
+        padding: 2.25rem 1.5rem;
+      }
+      .file-open h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.85rem;
+        letter-spacing: -0.03em;
+      }
+      .file-open p {
+        margin: 0 0 1rem;
+        color: #a89884;
+        line-height: 1.55;
+      }
+      .file-open code {
+        color: #efe6da;
+        background: #241e18;
+        padding: 0.12rem 0.4rem;
+        border-radius: 4px;
+        font-size: 0.92em;
+      }
+      .file-open a {
+        color: #c4894a;
+      }
+      .file-open ol {
+        margin: 0;
+        padding-left: 1.25rem;
+        color: #efe6da;
+        line-height: 1.7;
+      }
     </style>
   </head>
   <body>
@@ -45,12 +75,28 @@
     </div>
     <script>
       (function () {
+        // file:// cannot load Vite/ES modules — show how to open the real app immediately.
+        if (location.protocol === "file:") {
+          document.body.innerHTML =
+            '<div class="file-open">' +
+            "<h1>PairFold</h1>" +
+            "<p>This file cannot run when opened directly from disk.</p>" +
+            "<ol>" +
+            "<li>Double-click <code>Web\\Open PairFold.vbs</code> (one click — opens the app), or</li>" +
+            "<li>Double-click <code>Web\\PairFold.cmd</code></li>" +
+            "</ol>" +
+            "<p>Dev mode: <code>npm run dev</code> → " +
+            '<a href="http://127.0.0.1:5173/">http://127.0.0.1:5173/</a></p>' +
+            "</div>";
+          return;
+        }
+
         var status = document.getElementById("boot-status");
         var err = document.getElementById("boot-error");
         var timer = setTimeout(function () {
           if (status && status.textContent.indexOf("Starting") === 0) {
             status.textContent =
-              "Still loading scripts… If this hangs, hard-refresh (Ctrl+Shift+R) or try http://127.0.0.1:5173/";
+              "Still loading scripts… Hard-refresh (Ctrl+Shift+R), or open via Web\\Open PairFold.vbs";
           }
         }, 2500);
         window.__pairfoldClearBootTimer = function () {

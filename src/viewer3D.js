@@ -428,14 +428,90 @@ function tooltipHTML(meta, element) {
   const name = meta.abbr || meta.name || meta.code || "";
   const phi = fmtAngle(meta.phi);
   const psi = fmtAngle(meta.psi);
+  const variantRow = meta.variantLabel
+    ? `<div class="viewer-tip__row viewer-tip__variant">Variant ${meta.variantLabel}${
+        meta.variantFrom || meta.variantTo
+          ? ` · WT ${meta.variantFrom || "?"} → ${meta.variantTo || "Δ"}`
+          : ""
+      }</div>`
+    : "";
   return `
     <div class="viewer-tip__title" style="--c:${meta.color}">
       <span class="viewer-tip__swatch"></span>
       ${meta.index}${name ? ` · ${name}` : ""}
     </div>
     <div class="viewer-tip__row">${meta.code || ""}${atom}</div>
+    ${variantRow}
     <div class="viewer-tip__row viewer-tip__angles">φ ${phi} · ψ ${psi}</div>
   `;
+}
+
+/** Mark UniProt / WT-vs-mutant sites as glowing Cα points + labels. */
+function addVariantMarkers(root, residues, pickables, sites) {
+  if (!sites?.length || !residues?.length) return 0;
+  let placed = 0;
+  for (const site of sites) {
+    const idx = Number(site.index) - 1;
+    if (!Number.isFinite(idx) || idx < 0 || idx >= residues.length) continue;
+    const ca = residues[idx]?.CA;
+    if (!ca) continue;
+
+    const pos = new THREE.Vector3(ca.x, ca.y, ca.z);
+    const glow = new THREE.Mesh(
+      new THREE.SphereGeometry(1.25, 22, 22),
+      new THREE.MeshBasicMaterial({
+        color: 0xe07070,
+        transparent: true,
+        opacity: 0.28,
+        depthWrite: false,
+      }),
+    );
+    glow.position.copy(pos);
+    root.add(glow);
+
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(0.62, 20, 20),
+      new THREE.MeshStandardMaterial({
+        color: 0xe07070,
+        emissive: 0xb91c1c,
+        emissiveIntensity: 0.85,
+        roughness: 0.35,
+        metalness: 0.1,
+      }),
+    );
+    core.position.copy(pos);
+    const res = residues[idx];
+    const labelText = site.label || `${site.from || ""}${site.index}${site.to || "Δ"}`;
+    core.userData = {
+      pickable: true,
+      element: "CA",
+      atomName: "CA",
+      isVariantMark: true,
+      residue: {
+        index: site.index,
+        code: res.code || site.to || "",
+        abbr: res.abbr || abbrForCode(site.to || res.code),
+        name: res.name || nameForCode(site.to || res.code),
+        phi: res.phi,
+        psi: res.psi,
+        color: "#e07070",
+        variantLabel: labelText,
+        variantFrom: site.from || "",
+        variantTo: site.to ?? "",
+      },
+    };
+    root.add(core);
+    pickables.push(core);
+
+    const label = makeLabel(
+      labelText,
+      new THREE.Vector3(ca.x, ca.y + 1.55, ca.z),
+      "label3d label3d--variant",
+    );
+    root.add(label);
+    placed += 1;
+  }
+  return placed;
 }
 
 export function destroyPeptide3D(container) {
@@ -498,6 +574,12 @@ export function mountPeptide3D(container, input) {
     container.innerHTML = `<p class="empty">No residues to display.</p>`;
     return;
   }
+  const nVariant = addVariantMarkers(
+    root,
+    residues,
+    pickables,
+    input.variantSites || [],
+  );
   const spanGuess = Math.max(length * 1.2, 10);
   controls.maxDistance = Math.max(500, spanGuess * 15);
 
@@ -524,6 +606,16 @@ export function mountPeptide3D(container, input) {
     badge.className = "viewer-badge";
     badge.textContent = `All-atom · ${atoms.length} atoms`;
     container.appendChild(badge);
+  }
+  if (nVariant > 0) {
+    const vBadge = document.createElement("div");
+    vBadge.className = "viewer-badge viewer-badge--variant";
+    const first = input.variantSites?.[0]?.label;
+    vBadge.textContent =
+      nVariant === 1 && first
+        ? `Variant · ${first}`
+        : `${nVariant} variant site${nVariant === 1 ? "" : "s"}`;
+    container.appendChild(vBadge);
   }
   // Keep far plane beyond camera distance so long chains aren't clipped away
   const camDist = camera.position.distanceTo(controls.target);
@@ -611,6 +703,7 @@ export function mountPeptide3D(container, input) {
       return;
     }
     const hit =
+      hits.find((h) => h.object.userData.isVariantMark) ||
       hits.find((h) => h.object.userData.element === "CA") ||
       hits.find((h) => h.object.userData.isCaInstances) ||
       hits[0];

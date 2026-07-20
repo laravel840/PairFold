@@ -1,6 +1,22 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
+const rootDir = dirname(fileURLToPath(import.meta.url));
+
 export default defineConfig({
+  // Relative asset URLs so the built app works from FastAPI (/) and file-adjacent servers.
+  base: "./",
+  build: {
+    outDir: "dist",
+    emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        main: resolve(rootDir, "index.html"),
+        viewer: resolve(rootDir, "viewer.html"),
+      },
+    },
+  },
   server: {
     host: true,
     port: 5173,
@@ -20,13 +36,18 @@ export default defineConfig({
         "**/benchmarks/pdbs/**",
         "**/benchmarks/results/**",
         "**/node_modules/**",
+        "**/dist/**",
       ],
     },
     proxy: {
-      "/api": {
+      // Same paths as production (UI + API share one origin when served by pairfold.server)
+      "/predict": {
         target: "http://127.0.0.1:8000",
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, ""),
+      },
+      "/health": {
+        target: "http://127.0.0.1:8000",
+        changeOrigin: true,
       },
     },
   },

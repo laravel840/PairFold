@@ -6,6 +6,12 @@ import {
   suggestPeptides,
   PEPTIDE,
 } from "./data/angles.js";
+import {
+  applySequenceEdit,
+  fetchUniProtEntry,
+  filterVariants,
+  searchUniProt,
+} from "./uniprot.js";
 
 let selected = getPeptideAngles(["A", "G", "P", "V"]);
 let pdbResult = null;
@@ -18,16 +24,30 @@ let predictAbort = null;
 let stallTimer = 0;
 let lastProgressAt = 0;
 
+/** UniProtKB browser state */
+let uniprotQuery = "";
+let uniprotStatus = "";
+let uniprotBusy = false;
+let uniprotHits = [];
+let uniprotEntry = null;
+let variantTab = "natural"; // natural | mutant
+let variantFilter = "";
+let variantLimit = 40;
+const VARIANT_PAGE = 40;
+/** Sites differing from UniProt wild-type — marked in the 3D panel */
+let variantSites = [];
+
 const app = document.querySelector("#app");
-const API = "/api";
+/** Same-origin API (FastAPI UI or Vite proxy of /predict + /health). */
+const API = "";
 const MAX_PDB_LEN = 50000;
 /** Full ball-and-stick only for short chains; above ~400 the viewer uses a Cα trace. */
 const VIEW_3D_MAX = 50000;
 const NAME_LIST_MAX = 64;
 const SEG_PAGE_SIZE = 40;
 const SEG_SEARCH_MIN_LEN = 100;
-/** Abort predict if no progress event for this long (ms) — OS lag safeguard */
-const STALL_ABORT_MS = 25000;
+/** Abort predict if no progress/heartbeat for this long (ms). */
+const STALL_ABORT_MS = 120000;
 
 const KIND = {
   2: "dipeptide",
@@ -63,7 +83,16 @@ function stageHTML(view, ariaLabel, hint) {
         <button type="button" class="btn-3d" id="btn-open-3d" aria-label="${ariaLabel}">
           ${inline ? "Open larger 3D window" : "Open 3D structure"}
         </button>
-        <p class="viewer3d__hint">${n} residues · ${hint}</p>
+        <p class="viewer3d__hint">
+          ${n} residues · ${hint}
+          ${
+            variantSites.length
+              ? ` · <span class="viewer3d__variant-hint">${variantSites.length} variant site${
+                  variantSites.length === 1 ? "" : "s"
+                } marked</span>`
+              : ""
+          }
+        </p>
       </div>
     `;
   }
@@ -89,6 +118,7 @@ function cloneViewPayload(view) {
       mode: view.mode,
       tertiary: n <= 1000 ? view.tertiary || null : null,
       caTrace: n > 400,
+      variantSites: variantSites.length ? variantSites.map((s) => ({ ...s })) : [],
     };
     if (n <= 400) {
       payload.codes = view.codes
@@ -140,7 +170,7 @@ function open3DWindow() {
   const left = Math.max(0, Math.round((window.screen.width - w) / 2));
   const top = Math.max(0, Math.round((window.screen.height - h) / 2));
   const popup = window.open(
-    "/viewer.html",
+    new URL("viewer.html", window.location.href).href,
     "pairfold3d",
     `popup=yes,width=${w},height=${h},left=${left},top=${top},resizable=yes,scrollbars=no`,
   );
@@ -492,6 +522,7 @@ async function mountViewer() {
       // Force client all-atom path (ignore stripped API backbone-only structure)
       structure: null,
       caTrace: false,
+      variantSites: variantSites.length ? variantSites.map((s) => ({ ...s })) : [],
     };
     mountPeptide3D(host, payload);
   } catch (err) {
@@ -637,7 +668,7 @@ function armStallWatch() {
     }
     if (Date.now() - lastProgressAt > STALL_ABORT_MS) {
       abortPredict(
-        "Safety stop: no progress for 25s (likely memory pressure). Prediction cancelled — try a shorter sequence or refresh.",
+        "Safety stop: no progress for 2 minutes. Prediction cancelled — try again or use a shorter sequence.",
       );
     }
   }, 2000);
@@ -858,22 +889,66 @@ function parseSequenceFileText(text) {
   return cleanSeq(seqLines.join(""));
 }
 
-function applyLoadedSequence(seq, sourceLabel) {
+/**
+ * Build 1-based mutation markers from wild-type vs mutant sequences.
+ * Prefer an explicit UniProt site hint when provided.
+ */
+function buildVariantSites(wtSeq, mutSeq, hint) {
+  const wt = String(wtSeq || "");
+  const mut = String(mutSeq || "");
+  if (hint?.index != null && Number.isFinite(Number(hint.index))) {
+    const index = Number(hint.index);
+    return [
+      {
+        index,
+        from: hint.from ?? wt[index - 1] ?? "",
+        to: hint.to ?? mut[index - 1] ?? "",
+        label:
+          hint.label ||
+          `${hint.from ?? wt[index - 1] ?? ""}${index}${hint.to ?? mut[index - 1] ?? "Δ"}`,
+      },
+    ];
+  }
+  const sites = [];
+  const n = Math.max(wt.length, mut.length);
+  for (let i = 0; i < n; i++) {
+    const a = wt[i] || "";
+    const b = mut[i] || "";
+    if (a !== b) {
+      sites.push({
+        index: i + 1,
+        from: a || "–",
+        to: b || "Δ",
+        label: `${a || ""}${i + 1}${b || "Δ"}`,
+      });
+    }
+  }
+  // Cap labels so a huge indel does not flood the viewer
+  return sites.slice(0, 40);
+}
+
+function applyLoadedSequence(seq, sourceLabel, opts = {}) {
   const status = document.getElementById("predict-status");
   if (seq.length < 2) {
-    predictStatus = `File ${sourceLabel}: no usable sequence (need ≥2 amino acids).`;
+    predictStatus = `${sourceLabel}: no usable sequence (need ≥2 amino acids).`;
     if (status) status.textContent = predictStatus;
     return false;
   }
   if (seq.length > MAX_PDB_LEN) {
-    predictStatus = `File ${sourceLabel}: ${seq.length.toLocaleString()} aa exceeds max ${MAX_PDB_LEN.toLocaleString()}.`;
+    predictStatus = `${sourceLabel}: ${seq.length.toLocaleString()} aa exceeds max ${MAX_PDB_LEN.toLocaleString()}.`;
     if (status) status.textContent = predictStatus;
     return false;
   }
   if (!seqIsStandardAA(seq)) {
-    predictStatus = `File ${sourceLabel}: only the 20 standard amino acids are supported.`;
+    predictStatus = `${sourceLabel}: only the 20 standard amino acids are supported.`;
     if (status) status.textContent = predictStatus;
     return false;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(opts, "variantSites")) {
+    variantSites = Array.isArray(opts.variantSites) ? opts.variantSites : [];
+  } else if (!opts.keepVariantSites) {
+    variantSites = [];
   }
 
   query = seq;
@@ -883,7 +958,7 @@ function applyLoadedSequence(seq, sourceLabel) {
     input.value = seq.length > 500 ? "" : seq;
     input.placeholder =
       seq.length > 500
-        ? `Loaded ${seq.length.toLocaleString()} residues from file — ready to Predict`
+        ? `Loaded ${seq.length.toLocaleString()} residues — ready to Predict`
         : `e.g. AGPVK or up to ${MAX_PDB_LEN} residues for PDB predict…`;
   }
   const fileMeta = document.getElementById("seq-file-meta");
@@ -968,6 +1043,397 @@ function bindSequenceFileDrop() {
   });
 }
 
+function variantRowHTML(v) {
+  const change = escapeHtml(v.label || "");
+  const desc = escapeHtml(v.description || "—");
+  const id = escapeHtml(v.id || "");
+  return `
+    <li class="up-var">
+      <div class="up-var__main">
+        <code class="up-var__change">${change}</code>
+        ${id ? `<span class="up-var__id">${id}</span>` : ""}
+      </div>
+      <p class="up-var__desc">${desc}</p>
+      <button
+        type="button"
+        class="up-var__use"
+        data-var-kind="${escapeHtml(v.kind)}"
+        data-var-start="${v.start ?? ""}"
+        data-var-end="${v.end ?? ""}"
+        data-var-from="${escapeHtml(v.original || "")}"
+        data-var-to="${escapeHtml(v.alternatives?.[0] ?? "")}"
+        title="Load sequence and mark this site in 3D after Predict"
+      >
+        Use + mark in 3D
+      </button>
+    </li>`;
+}
+
+function uniprotHitsHTML() {
+  if (uniprotBusy && !uniprotHits.length && !uniprotEntry) {
+    return `<p class="up-status">Searching UniProtKB…</p>`;
+  }
+  if (!uniprotHits.length) {
+    if (uniprotStatus && !uniprotEntry) {
+      return `<p class="up-status">${escapeHtml(uniprotStatus)}</p>`;
+    }
+    return "";
+  }
+  return `
+    <ul class="up-hits" role="listbox">
+      ${uniprotHits
+        .map((h) => {
+          const active =
+            uniprotEntry?.accession === h.accession ? " is-active" : "";
+          const badge = h.reviewed ? "Swiss-Prot" : "TrEMBL";
+          return `
+            <li>
+              <button type="button" class="up-hit${active}" data-accession="${escapeHtml(h.accession)}">
+                <span class="up-hit__ids">
+                  <strong>${escapeHtml(h.accession)}</strong>
+                  <span>${escapeHtml(h.entryName || "")}</span>
+                  <em>${badge}</em>
+                </span>
+                <span class="up-hit__name">${escapeHtml(h.proteinName || "—")}</span>
+                <span class="up-hit__meta">
+                  ${escapeHtml(h.gene || "—")}
+                  · ${escapeHtml(h.organism || "—")}
+                  ${h.length ? ` · ${h.length} aa` : ""}
+                </span>
+              </button>
+            </li>`;
+        })
+        .join("")}
+    </ul>`;
+}
+
+function uniprotEntryHTML() {
+  const e = uniprotEntry;
+  if (!e) {
+    if (uniprotBusy) {
+      return `<p class="up-status">Loading entry from UniProtKB…</p>`;
+    }
+    return `
+      <p class="up-empty">
+        Search UniProtKB by <strong>protein name</strong>, <strong>gene</strong>,
+        <strong>Entry Name</strong> (e.g. P53_HUMAN), or <strong>accession</strong> (e.g. P04637).
+      </p>`;
+  }
+
+  const list = variantTab === "mutant" ? e.mutant : e.natural;
+  const filtered = filterVariants(list, variantFilter);
+  const shown = filtered.slice(0, variantLimit);
+  const remaining = Math.max(0, filtered.length - shown.length);
+  const fn = e.functionText
+    ? e.functionText.length > 420
+      ? `${e.functionText.slice(0, 420)}…`
+      : e.functionText
+    : "No function annotation in this field set.";
+
+  return `
+    <div class="up-entry">
+      <div class="up-info">
+        <p class="up-info__eyebrow">UniProtKB · ${e.reviewed ? "reviewed" : "unreviewed"}</p>
+        <h3 class="up-info__title">${escapeHtml(e.proteinName || e.entryName || e.accession)}</h3>
+        <dl class="up-info__dl">
+          <div><dt>Accession</dt><dd><code>${escapeHtml(e.accession)}</code></dd></div>
+          <div><dt>Entry name</dt><dd><code>${escapeHtml(e.entryName || "—")}</code></dd></div>
+          <div><dt>Gene</dt><dd>${escapeHtml(e.genes?.join(", ") || e.gene || "—")}</dd></div>
+          <div><dt>Organism</dt><dd>${escapeHtml(e.organism || e.scientificName || "—")}</dd></div>
+          <div><dt>Length</dt><dd>${e.length ? `${e.length} aa` : "—"}</dd></div>
+          <div><dt>Evidence</dt><dd>${escapeHtml(e.proteinExistence || "—")}</dd></div>
+          ${
+            e.annotationScore != null
+              ? `<div><dt>Annotation</dt><dd>${escapeHtml(String(e.annotationScore))}</dd></div>`
+              : ""
+          }
+        </dl>
+        <p class="up-info__fn"><span>Function</span>${escapeHtml(fn)}</p>
+        <div class="up-info__actions">
+          <button type="button" class="btn-up-seq" id="btn-up-use-wt">
+            Use wild-type sequence
+          </button>
+          ${
+            e.uniprotUrl
+              ? `<a class="up-info__link" href="${escapeHtml(e.uniprotUrl)}" target="_blank" rel="noopener noreferrer">Open on UniProt</a>`
+              : ""
+          }
+        </div>
+        ${uniprotStatus ? `<p class="up-status up-status--inline">${escapeHtml(uniprotStatus)}</p>` : ""}
+      </div>
+
+      <div class="up-vars" id="up-vars-panel">
+        <div class="up-vars__head">
+          <p class="up-vars__title">Sequence variations</p>
+          <div class="up-vars__tabs" role="tablist">
+            <button
+              type="button"
+              class="up-vars__tab${variantTab === "natural" ? " is-active" : ""}"
+              data-var-tab="natural"
+              role="tab"
+              aria-selected="${variantTab === "natural"}"
+            >
+              Natural (${e.natural.length})
+            </button>
+            <button
+              type="button"
+              class="up-vars__tab${variantTab === "mutant" ? " is-active" : ""}"
+              data-var-tab="mutant"
+              role="tab"
+              aria-selected="${variantTab === "mutant"}"
+            >
+              Mutagenesis (${e.mutant.length})
+            </button>
+          </div>
+        </div>
+        <label class="up-vars__filter">
+          <span>Filter</span>
+          <input
+            id="up-var-filter"
+            type="search"
+            placeholder="e.g. 175 · R175H · cancer · VAR_"
+            value="${escapeHtml(variantFilter)}"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+        <p class="up-vars__count">
+          Showing ${shown.length} of ${filtered.length}
+          ${variantFilter.trim() ? " (filtered)" : ""}
+          · ${variantTab === "natural" ? "natural polymorphism / disease variants" : "experimental mutagenesis"}
+        </p>
+        <ul class="up-vars__list">
+          ${
+            shown.length
+              ? shown.map(variantRowHTML).join("")
+              : `<li class="up-vars__empty">No ${variantTab === "natural" ? "natural" : "mutagenesis"} variants match.</li>`
+          }
+        </ul>
+        ${
+          remaining > 0
+            ? `<button type="button" class="up-vars__more" id="up-var-more">
+                Show more (${Math.min(VARIANT_PAGE, remaining)} of ${remaining} left)
+              </button>`
+            : ""
+        }
+      </div>
+    </div>`;
+}
+
+function uniprotPanelHTML() {
+  return `
+    <div id="uniprot-panel" class="uniprot">
+      <div class="section-head">
+        <h2>UniProtKB</h2>
+        <p>Import by name, gene, Entry Name, or accession</p>
+      </div>
+      <form id="uniprot-form" class="up-search" autocomplete="off">
+        <label class="search-box up-search__field">
+          <span class="search-box__label">Protein search</span>
+          <input
+            id="uniprot-q"
+            type="search"
+            placeholder="e.g. TP53 · P04637 · P53_HUMAN · hemoglobin"
+            value="${escapeHtml(uniprotQuery)}"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+        <button type="submit" class="btn-up-search" id="btn-uniprot-search" ${uniprotBusy ? "disabled" : ""}>
+          ${uniprotBusy ? "Working…" : "Search UniProt"}
+        </button>
+      </form>
+      <div id="uniprot-hits">${uniprotHitsHTML()}</div>
+      <div id="uniprot-entry">${uniprotEntryHTML()}</div>
+    </div>`;
+}
+
+function refreshUniprotPanel() {
+  const root = document.getElementById("uniprot-panel");
+  if (!root) return;
+  const keepFilter = document.activeElement?.id === "up-var-filter";
+  const keepSearch = document.activeElement?.id === "uniprot-q";
+  const caret = keepFilter
+    ? document.getElementById("up-var-filter")?.selectionStart
+    : keepSearch
+      ? document.getElementById("uniprot-q")?.selectionStart
+      : null;
+  root.outerHTML = uniprotPanelHTML();
+  bindUniprot();
+  if (keepFilter) {
+    const el = document.getElementById("up-var-filter");
+    if (el) {
+      el.focus();
+      if (caret != null) el.setSelectionRange(caret, caret);
+    }
+  } else if (keepSearch) {
+    const el = document.getElementById("uniprot-q");
+    if (el) {
+      el.focus();
+      if (caret != null) el.setSelectionRange(caret, caret);
+    }
+  }
+}
+
+async function runUniProtSearch() {
+  const q = uniprotQuery.trim();
+  if (!q || uniprotBusy) return;
+  uniprotBusy = true;
+  uniprotStatus = "";
+  uniprotHits = [];
+  refreshUniprotPanel();
+  let autoAccession = null;
+  try {
+    const { results } = await searchUniProt(q, 12);
+    uniprotHits = results;
+    uniprotStatus = results.length
+      ? `Found ${results.length} hit(s). Select one to load details.`
+      : "No UniProtKB entries matched that query.";
+    if (results.length === 1) {
+      autoAccession = results[0].accession;
+    } else {
+      const exact = results.find(
+        (h) =>
+          h.accession.toUpperCase() === q.toUpperCase() ||
+          h.entryName.toUpperCase() === q.toUpperCase(),
+      );
+      if (exact) autoAccession = exact.accession;
+    }
+  } catch (err) {
+    uniprotStatus = err.message || String(err);
+  }
+  uniprotBusy = false;
+  refreshUniprotPanel();
+  if (autoAccession) await loadUniProtEntry(autoAccession);
+}
+
+async function loadUniProtEntry(accession) {
+  uniprotBusy = true;
+  uniprotStatus = "";
+  variantFilter = "";
+  variantLimit = VARIANT_PAGE;
+  variantTab = "natural";
+  refreshUniprotPanel();
+  try {
+    uniprotEntry = await fetchUniProtEntry(accession);
+    uniprotStatus = `Loaded ${uniprotEntry.accession} · ${uniprotEntry.natural.length} natural · ${uniprotEntry.mutant.length} mutagenesis`;
+  } catch (err) {
+    uniprotEntry = null;
+    uniprotStatus = err.message || String(err);
+  } finally {
+    uniprotBusy = false;
+    refreshUniprotPanel();
+  }
+}
+
+function standardSeqOnly(raw) {
+  return cleanSeq(raw).replace(/[^ACDEFGHIKLMNPQRSTVWY]/g, "");
+}
+
+function useUniProtWildType() {
+  if (!uniprotEntry?.sequence) {
+    uniprotStatus = "No sequence on this entry.";
+    refreshUniprotPanel();
+    return;
+  }
+  const seq = standardSeqOnly(uniprotEntry.sequence);
+  const ok = applyLoadedSequence(
+    seq,
+    `${uniprotEntry.accession} (${uniprotEntry.entryName || "UniProt"})`,
+    { variantSites: [] },
+  );
+  if (ok) {
+    const stripped = (uniprotEntry.sequence?.length || 0) - seq.length;
+    uniprotStatus = stripped
+      ? `Wild-type loaded (${seq.length} aa; removed ${stripped} non-standard residue(s)). Ready to Predict.`
+      : `Wild-type sequence loaded (${seq.length} aa). Ready to Predict.`;
+    refreshUniprotPanel();
+  }
+}
+
+function useUniProtVariant(btn) {
+  if (!uniprotEntry?.sequence) return;
+  const start = Number(btn.dataset.varStart);
+  const end = Number(btn.dataset.varEnd || btn.dataset.varStart);
+  const from = btn.dataset.varFrom || "";
+  const to = btn.dataset.varTo ?? "";
+  const kind = btn.dataset.varKind || "natural";
+  const variant = {
+    start: Number.isFinite(start) ? start : null,
+    end: Number.isFinite(end) ? end : null,
+    original: from,
+    alternatives: [to],
+    label: `${from}${start}${to || "Δ"}`,
+  };
+  try {
+    const wt = standardSeqOnly(uniprotEntry.sequence);
+    const mutated = standardSeqOnly(applySequenceEdit(uniprotEntry.sequence, variant, 0));
+    const label = `${uniprotEntry.accession} ${variant.label} (${kind})`;
+    const sites = buildVariantSites(wt, mutated, {
+      index: variant.start,
+      from,
+      to,
+      label: variant.label,
+    });
+    const ok = applyLoadedSequence(mutated, label, { variantSites: sites });
+    if (ok) {
+      uniprotStatus = `Loaded ${kind} ${variant.label} (${mutated.length} aa) · marked in 3D after Predict.`;
+      refreshUniprotPanel();
+    }
+  } catch (err) {
+    uniprotStatus = err.message || String(err);
+    refreshUniprotPanel();
+  }
+}
+
+function bindUniprot() {
+  const form = document.getElementById("uniprot-form");
+  const input = document.getElementById("uniprot-q");
+  form?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    uniprotQuery = input?.value || "";
+    runUniProtSearch();
+  });
+  input?.addEventListener("input", (e) => {
+    uniprotQuery = e.target.value;
+  });
+
+  document.querySelectorAll(".up-hit").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const acc = btn.dataset.accession;
+      if (acc) loadUniProtEntry(acc);
+    });
+  });
+
+  document.getElementById("btn-up-use-wt")?.addEventListener("click", () => {
+    useUniProtWildType();
+  });
+
+  document.querySelectorAll("[data-var-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      variantTab = btn.dataset.varTab === "mutant" ? "mutant" : "natural";
+      variantLimit = VARIANT_PAGE;
+      refreshUniprotPanel();
+    });
+  });
+
+  const vf = document.getElementById("up-var-filter");
+  vf?.addEventListener("input", (e) => {
+    variantFilter = e.target.value;
+    variantLimit = VARIANT_PAGE;
+    refreshUniprotPanel();
+  });
+
+  document.getElementById("up-var-more")?.addEventListener("click", () => {
+    variantLimit += VARIANT_PAGE;
+    refreshUniprotPanel();
+  });
+
+  document.querySelectorAll(".up-var__use").forEach((btn) => {
+    btn.addEventListener("click", () => useUniProtVariant(btn));
+  });
+}
+
 function render() {
   app.innerHTML = `
     <div class="page">
@@ -992,8 +1458,10 @@ function render() {
       <section class="explorer">
         <div class="section-head">
           <h2>Find / predict</h2>
-          <p>Local 2–5 · PDB up to ${MAX_PDB_LEN} · 3D/tertiary ≤${VIEW_3D_MAX}</p>
+          <p>UniProtKB · paste · file · PDB up to ${MAX_PDB_LEN}</p>
         </div>
+
+        ${uniprotPanelHTML()}
 
         <label class="search-box">
           <span class="search-box__label">Sequence</span>
@@ -1060,6 +1528,7 @@ function render() {
   bind();
   mountViewer();
   bindSegPanel();
+  bindUniprot();
 }
 
 function bind() {
